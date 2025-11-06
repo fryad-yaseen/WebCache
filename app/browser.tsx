@@ -19,12 +19,12 @@ export default function BrowserScreen() {
   const router = useRouter();
   const params = useLocalSearchParams<{ url?: string; id?: string }>();
 
-  const [input, setInput] = useState<string>(typeof params.url === 'string' ? params.url : 'https://example.com');
+  const [input, setInput] = useState<string>(typeof params.url === 'string' ? params.url : '');
   const [overlayVisible, setOverlayVisible] = useState(false);
   const [saving, setSaving] = useState(false);
 
   type Source = { type: 'remote'; url: string } | { type: 'saved'; page: SavedPage };
-  const [source, setSource] = useState<Source>(() => ({ type: 'remote', url: typeof params.url === 'string' ? params.url : 'https://example.com' }));
+  const [source, setSource] = useState<Source>(() => ({ type: 'remote', url: typeof params.url === 'string' ? params.url : 'about:blank' }));
   const webRef = useRef<WebViewType>(null);
   const [WebViewImpl, setWebViewImpl] = useState<WebViewType | null>(null);
   const [webviewError, setWebviewError] = useState<string | null>(null);
@@ -165,6 +165,7 @@ export default function BrowserScreen() {
                   value={input}
                   onChangeText={setInput}
                   placeholder="Enter URL (e.g. example.com)"
+                  placeholderTextColor={colorScheme==='dark' ? 'rgba(255,255,255,0.5)' : 'rgba(0,0,0,0.5)'}
                   autoCapitalize="none"
                   autoCorrect={false}
                   keyboardType={Platform.select({ ios: 'url', android: 'url', default: 'default' })}

@@ -14,11 +14,13 @@ export default function HomeScreen() {
   const colorScheme = useColorScheme();
   const theme = Colors[colorScheme ?? 'light'];
 
-  const [input, setInput] = useState('https://example.com');
+  const [input, setInput] = useState('');
   const [pages, setPages] = useState<SavedPage[]>([]);
   const [refreshing, setRefreshing] = useState(false);
 
   const bgInput = colorScheme === 'dark' ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)';
+  const borderInput = colorScheme === 'dark' ? 'rgba(255,255,255,0.15)' : 'rgba(0,0,0,0.15)';
+  const placeholder = colorScheme === 'dark' ? 'rgba(255,255,255,0.5)' : 'rgba(0,0,0,0.5)';
 
   async function refresh() {
     setRefreshing(true);
@@ -49,11 +51,12 @@ export default function HomeScreen() {
           value={input}
           onChangeText={setInput}
           placeholder="Enter URL to open"
+          placeholderTextColor={placeholder}
           autoCapitalize="none"
           autoCorrect={false}
           returnKeyType="go"
           onSubmitEditing={openUrl}
-          style={[styles.input, { color: theme.text, borderColor: 'rgba(0,0,0,0.15)', backgroundColor: bgInput }]}
+          style={[styles.input, { color: theme.text, borderColor: borderInput, backgroundColor: bgInput }]}
         />
         <Pressable onPress={openUrl} style={({ pressed }) => [styles.button, { backgroundColor: theme.tint, opacity: pressed ? 0.85 : 1 }]}>
           <ThemedText style={styles.buttonText}>Open</ThemedText>
