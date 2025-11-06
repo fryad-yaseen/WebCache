@@ -1,10 +1,9 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Pressable, StyleSheet, TextInput, View } from 'react-native';
+import { Pressable, StyleSheet, TextInput } from 'react-native';
 import { router } from 'expo-router';
 import { useFocusEffect } from '@react-navigation/native';
 
-import { ThemedText } from '@/components/themed-text';
-import { ThemedView } from '@/components/themed-view';
+import { Box, Text } from '@/theme/restyle';
 import { Colors } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import type { SavedPage } from '@/lib/cache';
@@ -20,7 +19,8 @@ export default function HomeScreen() {
 
   const bgInput = colorScheme === 'dark' ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)';
   const borderInput = colorScheme === 'dark' ? 'rgba(255,255,255,0.15)' : 'rgba(0,0,0,0.15)';
-  const placeholder = colorScheme === 'dark' ? 'rgba(255,255,255,0.5)' : 'rgba(0,0,0,0.5)';
+  const placeholder = colorScheme === 'dark' ? 'rgba(255,255,255,0.55)' : 'rgba(0,0,0,0.5)';
+  const accent = colorScheme === 'dark' ? '#3b82f6' : Colors.light.tint;
 
   async function refresh() {
     setRefreshing(true);
@@ -45,8 +45,8 @@ export default function HomeScreen() {
   }
 
   return (
-    <ThemedView style={styles.container}>
-      <View style={styles.controlsRow}>
+    <Box flex={1} padding={3}>
+      <Box flexDirection="row" alignItems="center" style={styles.controlsRow}>
         <TextInput
           value={input}
           onChangeText={setInput}
@@ -58,33 +58,33 @@ export default function HomeScreen() {
           onSubmitEditing={openUrl}
           style={[styles.input, { color: theme.text, borderColor: borderInput, backgroundColor: bgInput }]}
         />
-        <Pressable onPress={openUrl} style={({ pressed }) => [styles.button, { backgroundColor: theme.tint, opacity: pressed ? 0.85 : 1 }]}>
-          <ThemedText style={styles.buttonText}>Open</ThemedText>
+        <Pressable onPress={openUrl} style={({ pressed }) => [styles.button, { backgroundColor: accent, opacity: pressed ? 0.85 : 1 }]}>
+          <Text color="buttonText">Open</Text>
         </Pressable>
-      </View>
+      </Box>
 
-      <ThemedText type="subtitle" style={{ marginTop: 12, marginBottom: 4 }}>Saved Pages</ThemedText>
-      <View style={{ flex: 1 }}>
+      <Text variant="subtitle" style={{ marginTop: 12, marginBottom: 4 }}>Saved Pages</Text>
+      <Box flex={1}>
         {pages.length === 0 ? (
-          <ThemedText style={{ opacity: 0.7 }}>No saved pages yet.</ThemedText>
+          <Text color="muted">No saved pages yet.</Text>
         ) : (
           pages.map((p) => (
-            <View key={p.id} style={styles.itemRow}>
-              <View style={{ flex: 1 }}>
-                <ThemedText numberOfLines={1} style={{ fontWeight: '600' }}>{p.title || p.url}</ThemedText>
-                <ThemedText numberOfLines={1} style={{ opacity: 0.7, fontSize: 12 }}>{p.url}</ThemedText>
-              </View>
-              <Pressable onPress={() => router.push({ pathname: '/browser', params: { id: p.id } })} style={({ pressed }) => [styles.smallBtn, { backgroundColor: theme.tint, opacity: pressed ? 0.85 : 1 }]}>
-                <ThemedText style={styles.smallBtnText}>Open</ThemedText>
+            <Box key={p.id} flexDirection="row" alignItems="center" paddingVertical={2} borderBottomWidth={StyleSheet.hairlineWidth} borderBottomColor="border" style={{ gap: 8 }}>
+              <Box style={{ flex: 1 }}>
+                <Text numberOfLines={1} style={{ fontWeight: '600' }}>{p.title || p.url}</Text>
+                <Text numberOfLines={1} color="muted" style={{ fontSize: 12 }}>{p.url}</Text>
+              </Box>
+              <Pressable onPress={() => router.push({ pathname: '/browser', params: { id: p.id } })} style={({ pressed }) => [styles.smallBtn, { backgroundColor: accent, opacity: pressed ? 0.85 : 1 }]}>
+                <Text color="buttonText">Open</Text>
               </Pressable>
               <Pressable onPress={async () => { await removeSavedPage(p.id); refresh(); }} style={({ pressed }) => [styles.smallBtn, { backgroundColor: '#d33', opacity: pressed ? 0.85 : 1 }]}>
-                <ThemedText style={styles.smallBtnText}>Delete</ThemedText>
+                <Text color="buttonText">Delete</Text>
               </Pressable>
-            </View>
+            </Box>
           ))
         )}
-      </View>
-    </ThemedView>
+      </Box>
+    </Box>
   );
 }
 

@@ -4,8 +4,7 @@ import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import { runOnJS } from 'react-native-reanimated';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 
-import { ThemedText } from '@/components/themed-text';
-import { ThemedView } from '@/components/themed-view';
+import { Box, Text } from '@/theme/restyle';
 import { Colors } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import type { SavedPage } from '@/lib/cache';
@@ -22,12 +21,16 @@ export default function BrowserScreen() {
   const [input, setInput] = useState<string>(typeof params.url === 'string' ? params.url : '');
   const [overlayVisible, setOverlayVisible] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [saveMode, setSaveMode] = useState<'device' | 'light' | 'dark'>('device');
+  const [canGoBack, setCanGoBack] = useState(false);
 
   type Source = { type: 'remote'; url: string } | { type: 'saved'; page: SavedPage };
   const [source, setSource] = useState<Source>(() => ({ type: 'remote', url: typeof params.url === 'string' ? params.url : 'about:blank' }));
   const webRef = useRef<WebViewType>(null);
   const [WebViewImpl, setWebViewImpl] = useState<WebViewType | null>(null);
   const [webviewError, setWebviewError] = useState<string | null>(null);
+  const [webError, setWebError] = useState<string | null>(null);
+  const [webLoading, setWebLoading] = useState<boolean>(false);
   const lastScrollRef = useRef(0);
   const scrollPersistTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -74,12 +77,78 @@ export default function BrowserScreen() {
     Gesture.Tap()
       .numberOfTaps(1)
       .minPointers(2)
-      .onEnd(() => {
-        runOnJS(toggleOverlay)();
-      })
+      .maxDeltaX(12)
+      .maxDeltaY(12)
+      .maxDuration(220)
+      .cancelsTouchesInView(false)
+      .onEnd(() => { runOnJS(toggleOverlay)(); })
   , [toggleOverlay]);
 
+  const goBackIfPossible = useCallback(() => {
+    if (canGoBack && webRef.current) {
+      try {
+        // @ts-ignore
+        webRef.current.goBack();
+      } catch {}
+    }
+  }, [canGoBack]);
+
+  const backTriggeredRef = useRef(false);
+  const edgePan = useMemo(() =>
+    Gesture.Pan()
+      .hitSlop({ left: 0, width: 64 })
+      .onBegin(() => { backTriggeredRef.current = false; })
+      .onUpdate((e) => {
+        if (!backTriggeredRef.current && (e.translationX > 40 || e.velocityX > 800) && Math.abs(e.translationY) < 100) {
+          backTriggeredRef.current = true;
+          runOnJS(goBackIfPossible)();
+        }
+      })
+      .onFinalize(() => { backTriggeredRef.current = false; })
+  , [goBackIfPossible]);
+
+  function SegmentedOption({ label, selected, onPress, accent }: { label: string; selected: boolean; onPress: () => void; accent: string }) {
+    return (
+      <Pressable onPress={onPress} style={({ pressed }) => [
+        {
+          height: 32,
+          paddingHorizontal: 12,
+          borderRadius: 8,
+          alignItems: 'center',
+          justifyContent: 'center',
+          borderWidth: 1,
+          borderColor: selected ? accent : 'rgba(125,125,125,0.4)',
+          backgroundColor: selected ? accent : 'transparent',
+          opacity: pressed ? 0.85 : 1,
+        },
+      ]}>
+        <Text style={selected ? { color: '#fff' } : undefined}>{label}</Text>
+      </Pressable>
+    );
+  }
+
   const injectedBase = useMemo(() => getInjectedBaseScript(source.type === 'saved' ? source.page.scrollY : 0), [source]);
+
+  // Live preview of theme choice before saving (remote pages only)
+  useEffect(() => {
+    if (source.type !== 'remote') return;
+    if (!webRef.current) return;
+    const apply = `(() => { try {
+      var prev = document.getElementById('__rn_save_theme');
+      if (prev && prev.parentNode) prev.parentNode.removeChild(prev);
+      var mode = ${JSON.stringify(saveMode)};
+      var deviceDark = ${JSON.stringify(colorScheme === 'dark')};
+      var shouldInvert = (mode === 'dark' && deviceDark === false) || (mode === 'light' && deviceDark === true);
+      if (shouldInvert) {
+        var style = document.createElement('style');
+        style.id = '__rn_save_theme';
+        style.textContent = 'html { filter: invert(1) hue-rotate(180deg); background: #111 !important; } img, picture, video, canvas, svg { filter: invert(1) hue-rotate(180deg) !important; }';
+        document.documentElement.appendChild(style);
+      }
+    } catch (e) {} })(); true;`;
+    // @ts-ignore
+    webRef.current.injectJavaScript(apply);
+  }, [saveMode, colorScheme, source]);
 
   const handleMessage = useCallback(async (event: any) => {
     try {
@@ -113,16 +182,31 @@ export default function BrowserScreen() {
   const requestSave = useCallback(() => {
     if (!WebViewImpl || !webRef.current) return;
     setSaving(true);
-    const cmd = `(() => { try { if (window.__rn_savePage) { window.__rn_savePage(); } } catch (e) {} })(); true;`;
+    const opts = JSON.stringify({ mode: saveMode, deviceDark: colorScheme === 'dark' });
+    const cmd = `(() => { try { if (window.__rn_savePage) { window.__rn_savePage(${opts}); } } catch (e) {} })(); true;`;
     // @ts-ignore
     webRef.current.injectJavaScript(cmd);
-  }, [WebViewImpl]);
+  }, [WebViewImpl, saveMode, colorScheme]);
 
-  const overlayDim = colorScheme === 'dark' ? 'rgba(0,0,0,0.5)' : 'rgba(0,0,0,0.35)';
+  const overlayDim = withAlpha(realColor(theme.text), colorScheme === 'dark' ? 0.5 : 0.35);
+  const accent = colorScheme === 'dark' ? '#3b82f6' : theme.tint;
+  const subtleBg = colorScheme === 'dark' ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)';
+  const borderColor = withAlpha(realColor(theme.text), 0.15);
 
   return (
     <GestureDetector gesture={twoFingerTap}>
-      <ThemedView style={styles.container}>
+      <Box style={styles.container} backgroundColor="background">
+        {/* Offline / error banner for remote pages */}
+        {source.type === 'remote' && webError && (
+          <Box position="absolute" top={0} left={0} right={0} padding={3} backgroundColor="danger" style={{ zIndex: 10 }}>
+            <Text color="buttonText">{webError}</Text>
+            <View style={{ height: 8 }} />
+            <Pressable onPress={() => { try { // @ts-ignore
+              webRef.current?.reload?.(); setWebError(null); } catch {} }} style={({ pressed }) => [styles.button, { backgroundColor: '#00000033', opacity: pressed ? 0.85 : 1 }]}>
+              <Text color="buttonText">Retry</Text>
+            </Pressable>
+          </Box>
+        )}
         {WebViewImpl ? (
           <WebViewImpl
             ref={webRef}
@@ -137,58 +221,87 @@ export default function BrowserScreen() {
             style={styles.webview}
             injectedJavaScriptBeforeContentLoaded={injectedBase}
             onMessage={handleMessage}
+            onLoadStart={() => { setWebError(null); setWebLoading(true); }}
+            onLoadEnd={() => setWebLoading(false)}
+            onError={(syntheticEvent: any) => {
+              setWebLoading(false);
+              setWebError('No internet connection. Connect to the internet and try again.');
+            }}
+            onHttpError={(e: any) => {
+              setWebLoading(false);
+              setWebError(`HTTP error ${e?.nativeEvent?.statusCode || ''}. The site may be down.`);
+            }}
+            onNavigationStateChange={(navState: any) => setCanGoBack(!!navState?.canGoBack)}
           />
         ) : (
-          <ThemedView style={styles.placeholder}>
-            <ThemedText type="subtitle" style={{ textAlign: 'center' }}>
+          <Box style={styles.placeholder}>
+            <Text variant="subtitle" style={{ textAlign: 'center' }}>
               WebView not available yet.
-            </ThemedText>
-            <ThemedText style={{ textAlign: 'center', marginTop: 8 }}>
+            </Text>
+            <Text style={{ textAlign: 'center', marginTop: 8 }}>
               If you’re using Expo Go, build a Dev Client or rebuild after installing react-native-webview.
-            </ThemedText>
+            </Text>
             {webviewError ? (
-              <ThemedText style={{ marginTop: 8, opacity: 0.6 }}>Error: {webviewError}</ThemedText>
+              <Text style={{ marginTop: 8, opacity: 0.6 }}>Error: {webviewError}</Text>
             ) : null}
             {Platform.OS === 'web' ? (
               // @ts-ignore
               <iframe src={source.type === 'remote' ? source.url : ''} style={{ border: 0, width: '100%', height: '100%', marginTop: 12 }} />
             ) : null}
-          </ThemedView>
+          </Box>
         )}
 
         {overlayVisible && (
-          <View pointerEvents="box-none" style={[styles.overlay, { backgroundColor: overlayDim }]}> 
-            <View style={[styles.panel, { backgroundColor: theme.background }]}> 
-              <ThemedText type="subtitle">Controls</ThemedText>
-              <View style={styles.controlsRow}>
-                <TextInput
-                  value={input}
-                  onChangeText={setInput}
-                  placeholder="Enter URL (e.g. example.com)"
-                  placeholderTextColor={colorScheme==='dark' ? 'rgba(255,255,255,0.5)' : 'rgba(0,0,0,0.5)'}
-                  autoCapitalize="none"
-                  autoCorrect={false}
-                  keyboardType={Platform.select({ ios: 'url', android: 'url', default: 'default' })}
-                  returnKeyType="go"
-                  onSubmitEditing={onGo}
-                  style={[styles.input, { color: theme.text, borderColor: withAlpha(theme.text, 0.15), backgroundColor: colorScheme==='dark' ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)' }]}
-                />
-                <Pressable onPress={onGo} style={({ pressed }) => [styles.button, { backgroundColor: theme.tint, opacity: pressed ? 0.85 : 1 }]}>
-                  <ThemedText style={styles.buttonText}>Go</ThemedText>
-                </Pressable>
-              </View>
-              <View style={styles.controlsRow}>
-                <Pressable onPress={requestSave} disabled={!WebViewImpl || saving} style={({ pressed }) => [styles.button, { backgroundColor: saving ? '#999' : theme.tint, opacity: pressed ? 0.85 : 1 }]}>
-                  <ThemedText style={styles.buttonText}>{saving ? 'Saving…' : 'Save'}</ThemedText>
-                </Pressable>
-                <Pressable onPress={() => router.back()} style={({ pressed }) => [styles.button, { backgroundColor: '#444', opacity: pressed ? 0.85 : 1 }]}>
-                  <ThemedText style={styles.buttonText}>Exit</ThemedText>
-                </Pressable>
-              </View>
-            </View>
-          </View>
+          <Box pointerEvents="box-none" style={[styles.overlay, { backgroundColor: overlayDim }]}> 
+            <Box style={[styles.panel]} backgroundColor="background">
+              <Text variant="subtitle">Controls</Text>
+              {source.type === 'remote' ? (
+                <>
+                  <Box flexDirection="row" alignItems="center" style={styles.controlsRow}>
+                    <TextInput
+                      value={input}
+                      onChangeText={setInput}
+                      placeholder="Enter URL (e.g. example.com)"
+                      placeholderTextColor={colorScheme==='dark' ? 'rgba(255,255,255,0.55)' : 'rgba(0,0,0,0.5)'}
+                      autoCapitalize="none"
+                      autoCorrect={false}
+                      keyboardType={Platform.select({ ios: 'url', android: 'url', default: 'default' })}
+                      returnKeyType="go"
+                      onSubmitEditing={onGo}
+                      style={[styles.input, { color: theme.text, borderColor, backgroundColor: subtleBg }]}
+                    />
+                    <Pressable onPress={onGo} style={({ pressed }) => [styles.button, { backgroundColor: accent, opacity: pressed ? 0.85 : 1 }]}>
+                      <Text color="buttonText">Go</Text>
+                    </Pressable>
+                  </Box>
+                  <Box flexDirection="row" alignItems="center" style={styles.controlsRow}>
+                    <SegmentedOption label="Device" selected={saveMode==='device'} onPress={() => setSaveMode('device')} accent={accent} />
+                    <SegmentedOption label="Light" selected={saveMode==='light'} onPress={() => setSaveMode('light')} accent={accent} />
+                    <SegmentedOption label="Dark" selected={saveMode==='dark'} onPress={() => setSaveMode('dark')} accent={accent} />
+                  </Box>
+                  <Box flexDirection="row" alignItems="center" style={styles.controlsRow}>
+                    <Pressable onPress={requestSave} disabled={!WebViewImpl || saving} style={({ pressed }) => [styles.button, { backgroundColor: saving ? '#6b7280' : accent, opacity: pressed ? 0.85 : 1 }]}>
+                      <Text color="buttonText">{saving ? 'Saving…' : 'Save'}</Text>
+                    </Pressable>
+                    <Pressable onPress={() => router.back()} style={({ pressed }) => [styles.button, { backgroundColor: colorScheme==='dark' ? '#2d2d2d' : '#444', opacity: pressed ? 0.85 : 1 }]}>
+                      <Text color="buttonText">Exit</Text>
+                    </Pressable>
+                  </Box>
+                </>
+              ) : (
+                <Box flexDirection="row" alignItems="center" style={styles.controlsRow}>
+                  <Pressable onPress={() => router.back()} style={({ pressed }) => [styles.button, { backgroundColor: colorScheme==='dark' ? '#2d2d2d' : '#444', opacity: pressed ? 0.85 : 1 }]}>
+                    <Text color="buttonText">Exit</Text>
+                  </Pressable>
+                </Box>
+              )}
+            </Box>
+          </Box>
         )}
-      </ThemedView>
+        <GestureDetector gesture={edgePan}>
+          <View style={styles.edgeGesture} />
+        </GestureDetector>
+      </Box>
     </GestureDetector>
   );
 }
@@ -204,8 +317,13 @@ function normalizeUrl(value: string): string {
   }
 }
 
-function withAlpha(_color: string, alpha: number): string {
-  return `rgba(0,0,0,${alpha})`;
+function realColor(color: string): string { return color || '#000000'; }
+function withAlpha(color: string, alpha: number): string {
+  const c = realColor(color).replace('#','');
+  const r = parseInt(c.substring(0,2),16)||0;
+  const g = parseInt(c.substring(2,4),16)||0;
+  const b = parseInt(c.substring(4,6),16)||0;
+  return `rgba(${r},${g},${b},${alpha})`;
 }
 
 function getInjectedBaseScript(initialScrollY: number) {
@@ -255,8 +373,21 @@ function getInjectedBaseScript(initialScrollY: number) {
           }
         }
 
-        window.__rn_savePage = async function(){
+        window.__rn_savePage = async function(options){
           try {
+            try {
+              var prev = document.getElementById('__rn_save_theme');
+              if (prev && prev.parentNode) prev.parentNode.removeChild(prev);
+            } catch(e) {}
+            var mode = (options && options.mode) || options || 'device';
+            var deviceDark = !!(options && options.deviceDark);
+            var shouldInvert = (mode === 'dark' && deviceDark === false) || (mode === 'light' && deviceDark === true);
+            if (shouldInvert) {
+              var style = document.createElement('style');
+              style.id = '__rn_save_theme';
+              style.textContent = 'html { filter: invert(1) hue-rotate(180deg); background: #111 !important; } img, picture, video, canvas, svg { filter: invert(1) hue-rotate(180deg) !important; }';
+              document.documentElement.appendChild(style);
+            }
             await inlineStylesheets(document);
             await inlineImages(document);
             var html = '<!DOCTYPE html>'+document.documentElement.outerHTML;
@@ -319,5 +450,14 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     gap: 8,
     alignItems: 'center',
+  },
+  edgeGesture: {
+    position: 'absolute',
+    left: 0,
+    top: 0,
+    bottom: 0,
+    width: 48,
+    backgroundColor: 'transparent',
+    zIndex: 9999,
   },
 });
