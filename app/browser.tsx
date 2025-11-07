@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Platform, Pressable, StyleSheet, TextInput, View } from 'react-native';
+import { Platform, Pressable, StyleSheet, TextInput, View, useWindowDimensions } from 'react-native';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
-import { runOnJS } from 'react-native-reanimated';
+import Animated, { runOnJS, useAnimatedStyle, useSharedValue, withTiming } from 'react-native-reanimated';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 
 import { Box, Text } from '@/theme/restyle';
@@ -22,17 +22,21 @@ export default function BrowserScreen() {
   const [overlayVisible, setOverlayVisible] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveMode, setSaveMode] = useState<'device' | 'light' | 'dark'>('device');
-  const [canGoBack, setCanGoBack] = useState(false);
+  const [webCanGoBack, setWebCanGoBack] = useState(false);
+  const [webCanGoForward, setWebCanGoForward] = useState(false);
 
   type Source = { type: 'remote'; url: string } | { type: 'saved'; page: SavedPage };
   const [source, setSource] = useState<Source>(() => ({ type: 'remote', url: typeof params.url === 'string' ? params.url : 'about:blank' }));
   const webRef = useRef<WebViewType>(null);
   const [WebViewImpl, setWebViewImpl] = useState<WebViewType | null>(null);
   const [webviewError, setWebviewError] = useState<string | null>(null);
-  const [webError, setWebError] = useState<string | null>(null);
-  const [webLoading, setWebLoading] = useState<boolean>(false);
+  const [webBanner, setWebBanner] = useState<{ type: 'info' | 'error'; message: string } | null>(null);
+  const [, setWebLoading] = useState<boolean>(false);
   const lastScrollRef = useRef(0);
   const scrollPersistTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const translateX = useSharedValue(0);
+  const swipeCompleting = useSharedValue(0);
+  const { width } = useWindowDimensions();
 
   // Load saved page by ID if provided
   useEffect(() => {
@@ -51,17 +55,19 @@ export default function BrowserScreen() {
   }, [params.id]);
 
   useEffect(() => {
-    let active = true;
-    import('react-native-webview')
-      .then((mod: any) => {
-        if (active) setWebViewImpl(() => mod.WebView);
-      })
-      .catch((err) => {
-        if (active) setWebviewError(String(err?.message ?? err));
-      });
-    return () => {
-      active = false;
-    };
+    try {
+      // Avoid dynamic import so metro does not emit a split chunk in production.
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const mod = require('react-native-webview');
+      const Impl = mod?.WebView ?? mod?.default ?? null;
+      if (Impl) {
+        setWebViewImpl(() => Impl);
+      } else {
+        setWebviewError('react-native-webview did not export a WebView implementation.');
+      }
+    } catch (err: any) {
+      setWebviewError(String(err?.message ?? err));
+    }
   }, []);
 
   const normalized = useMemo(() => normalizeUrl(input), [input]);
@@ -84,28 +90,75 @@ export default function BrowserScreen() {
       .onEnd(() => { runOnJS(toggleOverlay)(); })
   , [toggleOverlay]);
 
-  const goBackIfPossible = useCallback(() => {
-    if (canGoBack && webRef.current) {
-      try {
-        // @ts-ignore
-        webRef.current.goBack();
-      } catch {}
-    }
-  }, [canGoBack]);
+  const goWebBack = useCallback(() => {
+    if (!webCanGoBack || !webRef.current) return;
+    try {
+      // @ts-ignore
+      webRef.current.goBack();
+    } catch {}
+  }, [webCanGoBack]);
 
-  const backTriggeredRef = useRef(false);
-  const edgePan = useMemo(() =>
+  const goWebForward = useCallback(() => {
+    if (!webCanGoForward || !webRef.current) return;
+    try {
+      // @ts-ignore
+      webRef.current.goForward();
+    } catch {}
+  }, [webCanGoForward]);
+
+  const finishSwipeBack = useCallback(() => {
+    if (router.canGoBack()) {
+      router.back();
+    } else {
+      translateX.value = 0;
+    }
+  }, [router, translateX]);
+
+  const swipeBackGesture = useMemo(() =>
     Gesture.Pan()
       .hitSlop({ left: 0, width: 64 })
-      .onBegin(() => { backTriggeredRef.current = false; })
-      .onUpdate((e) => {
-        if (!backTriggeredRef.current && (e.translationX > 40 || e.velocityX > 800) && Math.abs(e.translationY) < 100) {
-          backTriggeredRef.current = true;
-          runOnJS(goBackIfPossible)();
+      .activeOffsetX(12)
+      .failOffsetY([-24, 24])
+      .onBegin(() => {
+        swipeCompleting.value = 0;
+      })
+      .onUpdate((event) => {
+        if (event.translationX <= 0) {
+          translateX.value = 0;
+          return;
+        }
+        translateX.value = Math.min(event.translationX, width);
+      })
+      .onEnd((event) => {
+        const shouldComplete = translateX.value > width * 0.33 || event.velocityX > 900;
+        if (shouldComplete) {
+          swipeCompleting.value = 1;
+          translateX.value = withTiming(width, { duration: 200 }, (finished) => {
+            if (finished) {
+              runOnJS(finishSwipeBack)();
+            }
+          });
+        } else {
+          translateX.value = withTiming(0, { duration: 220 });
         }
       })
-      .onFinalize(() => { backTriggeredRef.current = false; })
-  , [goBackIfPossible]);
+      .onFinalize(() => {
+        if (swipeCompleting.value === 0) {
+          translateX.value = withTiming(0, { duration: 180 });
+        }
+      })
+  , [finishSwipeBack, swipeCompleting, translateX, width]);
+
+  const combinedGesture = useMemo(() => Gesture.Simultaneous(twoFingerTap, swipeBackGesture), [twoFingerTap, swipeBackGesture]);
+
+  const panAnimatedStyle = useAnimatedStyle(() => ({
+    transform: [{ translateX: translateX.value }],
+    shadowOpacity: translateX.value > 0 ? 0.15 : 0,
+    shadowRadius: translateX.value > 0 ? 8 : 0,
+    shadowColor: '#000',
+    shadowOffset: { width: -2, height: 0 },
+    elevation: translateX.value > 0 ? 6 : 0,
+  }));
 
   function SegmentedOption({ label, selected, onPress, accent }: { label: string; selected: boolean; onPress: () => void; accent: string }) {
     return (
@@ -128,6 +181,12 @@ export default function BrowserScreen() {
   }
 
   const injectedBase = useMemo(() => getInjectedBaseScript(source.type === 'saved' ? source.page.scrollY : 0), [source]);
+
+  useEffect(() => {
+    setWebCanGoBack(false);
+    setWebCanGoForward(false);
+    setWebBanner(null);
+  }, [source]);
 
   // Live preview of theme choice before saving (remote pages only)
   useEffect(() => {
@@ -194,62 +253,108 @@ export default function BrowserScreen() {
   const borderColor = withAlpha(realColor(theme.text), 0.15);
 
   return (
-    <GestureDetector gesture={twoFingerTap}>
-      <Box style={styles.container} backgroundColor="background">
-        {/* Offline / error banner for remote pages */}
-        {source.type === 'remote' && webError && (
-          <Box position="absolute" top={0} left={0} right={0} padding={3} backgroundColor="danger" style={{ zIndex: 10 }}>
-            <Text color="buttonText">{webError}</Text>
-            <View style={{ height: 8 }} />
-            <Pressable onPress={() => { try { // @ts-ignore
-              webRef.current?.reload?.(); setWebError(null); } catch {} }} style={({ pressed }) => [styles.button, { backgroundColor: '#00000033', opacity: pressed ? 0.85 : 1 }]}>
-              <Text color="buttonText">Retry</Text>
-            </Pressable>
-          </Box>
-        )}
-        {WebViewImpl ? (
-          <WebViewImpl
-            ref={webRef}
-            source={
-              source.type === 'remote'
-                ? { uri: source.url }
-                : { html: (global as any).__RNWC_LAST_HTML || '<html></html>', baseUrl: (global as any).__RNWC_LAST_BASEURL || undefined }
-            }
-            originWhitelist={["*"]}
-            allowsBackForwardNavigationGestures
-            setSupportMultipleWindows={false}
-            style={styles.webview}
-            injectedJavaScriptBeforeContentLoaded={injectedBase}
-            onMessage={handleMessage}
-            onLoadStart={() => { setWebError(null); setWebLoading(true); }}
-            onLoadEnd={() => setWebLoading(false)}
-            onError={(syntheticEvent: any) => {
-              setWebLoading(false);
-              setWebError('No internet connection. Connect to the internet and try again.');
-            }}
-            onHttpError={(e: any) => {
-              setWebLoading(false);
-              setWebError(`HTTP error ${e?.nativeEvent?.statusCode || ''}. The site may be down.`);
-            }}
-            onNavigationStateChange={(navState: any) => setCanGoBack(!!navState?.canGoBack)}
-          />
-        ) : (
-          <Box style={styles.placeholder}>
-            <Text variant="subtitle" style={{ textAlign: 'center' }}>
-              WebView not available yet.
-            </Text>
-            <Text style={{ textAlign: 'center', marginTop: 8 }}>
-              If you’re using Expo Go, build a Dev Client or rebuild after installing react-native-webview.
-            </Text>
-            {webviewError ? (
-              <Text style={{ marginTop: 8, opacity: 0.6 }}>Error: {webviewError}</Text>
-            ) : null}
-            {Platform.OS === 'web' ? (
-              // @ts-ignore
-              <iframe src={source.type === 'remote' ? source.url : ''} style={{ border: 0, width: '100%', height: '100%', marginTop: 12 }} />
-            ) : null}
-          </Box>
-        )}
+    <GestureDetector gesture={combinedGesture}>
+      <Animated.View style={[styles.animatedContainer, panAnimatedStyle]}>
+        <Box style={styles.container} backgroundColor="background">
+          {/* Offline / error banner for remote pages */}
+          {source.type === 'remote' && webBanner && (
+            <Box
+              position="absolute"
+              top={0}
+              left={0}
+              right={0}
+              padding={3}
+              style={[
+                styles.banner,
+                webBanner.type === 'error'
+                  ? {
+                      backgroundColor: colorScheme === 'dark' ? '#7f1d1d' : '#dc2626',
+                      borderColor: colorScheme === 'dark' ? '#ef4444' : '#b91c1c',
+                    }
+                  : {
+                      backgroundColor: colorScheme === 'dark' ? 'rgba(59,130,246,0.25)' : 'rgba(59,130,246,0.12)',
+                      borderColor: withAlpha(accent, 0.45),
+                    },
+              ]}
+            >
+              <Text style={[styles.bannerText, webBanner.type === 'error' ? { color: '#fff' } : { color: colorScheme === 'dark' ? '#bfdbfe' : '#1e3a8a' }]}>
+                {webBanner.message}
+              </Text>
+              <View style={{ height: 8 }} />
+              <Pressable onPress={() => { try { // @ts-ignore
+                webRef.current?.reload?.(); setWebBanner(null); } catch {} }} style={({ pressed }) => [
+                  styles.button,
+                  {
+                    backgroundColor: webBanner.type === 'error' ? '#00000033' : withAlpha(accent, pressed ? 0.55 : 0.35),
+                    opacity: pressed ? 0.85 : 1,
+                  },
+                ]}>
+                <Text style={[styles.bannerButtonText, webBanner.type === 'error'
+                  ? { color: '#fff' }
+                  : { color: colorScheme === 'dark' ? '#dbeafe' : '#1e3a8a' }
+                ]}>
+                  {webBanner.type === 'error' ? 'Retry' : 'Try Again'}
+                </Text>
+              </Pressable>
+            </Box>
+          )}
+          {WebViewImpl ? (
+            <WebViewImpl
+              ref={webRef}
+              source={
+                source.type === 'remote'
+                  ? { uri: source.url }
+                  : { html: (global as any).__RNWC_LAST_HTML || '<html></html>', baseUrl: (global as any).__RNWC_LAST_BASEURL || undefined }
+              }
+              originWhitelist={["*"]}
+              setSupportMultipleWindows={false}
+              style={styles.webview}
+              injectedJavaScriptBeforeContentLoaded={injectedBase}
+              onMessage={handleMessage}
+              onLoadStart={() => {
+                setWebBanner(null);
+                setWebLoading(true);
+              }}
+              onLoadEnd={() => setWebLoading(false)}
+              onError={(syntheticEvent: any) => {
+                setWebLoading(false);
+                const nativeEvent = syntheticEvent?.nativeEvent;
+                const description = String(nativeEvent?.description ?? '');
+                const rawCode = typeof nativeEvent?.code === 'number' ? nativeEvent.code : Number(nativeEvent?.code);
+                const code = Number.isFinite(rawCode) ? rawCode : NaN;
+                if (isOfflineLikeError(description, code)) {
+                  setWebBanner({ type: 'info', message: 'No internet connection. Connect to the internet and try again.' });
+                } else {
+                  setWebBanner({ type: 'error', message: 'Something went wrong loading this page.' });
+                }
+              }}
+              onHttpError={(e: any) => {
+                setWebLoading(false);
+                const status = e?.nativeEvent?.statusCode || '';
+                setWebBanner({ type: 'error', message: `HTTP error ${status}. The site may be down.` });
+              }}
+              onNavigationStateChange={(navState: any) => {
+                setWebCanGoBack(!!navState?.canGoBack);
+                setWebCanGoForward(!!navState?.canGoForward);
+              }}
+            />
+          ) : (
+            <Box style={styles.placeholder}>
+              <Text variant="subtitle" style={{ textAlign: 'center' }}>
+                WebView not available yet.
+              </Text>
+              <Text style={{ textAlign: 'center', marginTop: 8 }}>
+                If you’re using Expo Go, build a Dev Client or rebuild after installing react-native-webview.
+              </Text>
+              {webviewError ? (
+                <Text style={{ marginTop: 8, opacity: 0.6 }}>Error: {webviewError}</Text>
+              ) : null}
+              {Platform.OS === 'web' ? (
+                // @ts-ignore
+                <iframe src={source.type === 'remote' ? source.url : ''} style={{ border: 0, width: '100%', height: '100%', marginTop: 12 }} />
+              ) : null}
+            </Box>
+          )}
 
         {overlayVisible && (
           <Box pointerEvents="box-none" style={[styles.overlay, { backgroundColor: overlayDim }]}> 
@@ -280,6 +385,34 @@ export default function BrowserScreen() {
                     <SegmentedOption label="Dark" selected={saveMode==='dark'} onPress={() => setSaveMode('dark')} accent={accent} />
                   </Box>
                   <Box flexDirection="row" alignItems="center" style={styles.controlsRow}>
+                    <Pressable
+                      onPress={goWebBack}
+                      disabled={!webCanGoBack}
+                      style={({ pressed }) => [
+                        styles.button,
+                        {
+                          backgroundColor: webCanGoBack ? accent : '#6b7280',
+                          opacity: pressed && webCanGoBack ? 0.85 : 1,
+                        },
+                      ]}
+                    >
+                      <Text color="buttonText">Back</Text>
+                    </Pressable>
+                    <Pressable
+                      onPress={goWebForward}
+                      disabled={!webCanGoForward}
+                      style={({ pressed }) => [
+                        styles.button,
+                        {
+                          backgroundColor: webCanGoForward ? accent : '#6b7280',
+                          opacity: pressed && webCanGoForward ? 0.85 : 1,
+                        },
+                      ]}
+                    >
+                      <Text color="buttonText">Forward</Text>
+                    </Pressable>
+                  </Box>
+                  <Box flexDirection="row" alignItems="center" style={styles.controlsRow}>
                     <Pressable onPress={requestSave} disabled={!WebViewImpl || saving} style={({ pressed }) => [styles.button, { backgroundColor: saving ? '#6b7280' : accent, opacity: pressed ? 0.85 : 1 }]}>
                       <Text color="buttonText">{saving ? 'Saving…' : 'Save'}</Text>
                     </Pressable>
@@ -298,12 +431,17 @@ export default function BrowserScreen() {
             </Box>
           </Box>
         )}
-        <GestureDetector gesture={edgePan}>
-          <View style={styles.edgeGesture} />
-        </GestureDetector>
-      </Box>
+        </Box>
+      </Animated.View>
     </GestureDetector>
   );
+}
+
+function isOfflineLikeError(description: string, code: number): boolean {
+  const offlineCodes = new Set([-1009, -1020, -1005, -1001, -6, -2]);
+  if (Number.isFinite(code) && offlineCodes.has(code)) return true;
+  const lowered = description.toLowerCase();
+  return lowered.includes('internet') || lowered.includes('network') || lowered.includes('offline') || lowered.includes('disconnected');
 }
 
 function normalizeUrl(value: string): string {
@@ -451,13 +589,18 @@ const styles = StyleSheet.create({
     gap: 8,
     alignItems: 'center',
   },
-  edgeGesture: {
-    position: 'absolute',
-    left: 0,
-    top: 0,
-    bottom: 0,
-    width: 48,
-    backgroundColor: 'transparent',
-    zIndex: 9999,
+  animatedContainer: {
+    flex: 1,
+  },
+  banner: {
+    zIndex: 10,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: 8,
+  },
+  bannerText: {
+    fontWeight: '600',
+  },
+  bannerButtonText: {
+    fontWeight: '600',
   },
 });
