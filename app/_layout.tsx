@@ -15,7 +15,7 @@ export default function RootLayout() {
     <GestureHandlerRootView style={{ flex: 1 }}>
       <RestyleProvider theme={colorScheme === 'dark' ? darkTheme : lightTheme}>
         <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
-          <Stack>
+          <Stack screenOptions={{ gestureEnabled: true, fullScreenGestureEnabled: true }}>
             <Stack.Screen name="index" options={{ title: 'Saved Pages' }} />
             <Stack.Screen name="browser" options={{ headerShown: false }} />
           </Stack>

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Platform, Pressable, StyleSheet, TextInput, View, useWindowDimensions } from 'react-native';
+import { Platform, Pressable, StyleSheet, TextInput, View } from 'react-native';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
-import Animated, { runOnJS, useAnimatedStyle, useSharedValue, withTiming } from 'react-native-reanimated';
+import { runOnJS } from 'react-native-reanimated';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 
 import { Box, Text } from '@/theme/restyle';
@@ -34,9 +34,6 @@ export default function BrowserScreen() {
   const [, setWebLoading] = useState<boolean>(false);
   const lastScrollRef = useRef(0);
   const scrollPersistTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const translateX = useSharedValue(0);
-  const swipeCompleting = useSharedValue(0);
-  const { width } = useWindowDimensions();
 
   // Load saved page by ID if provided
   useEffect(() => {
@@ -105,60 +102,6 @@ export default function BrowserScreen() {
       webRef.current.goForward();
     } catch {}
   }, [webCanGoForward]);
-
-  const finishSwipeBack = useCallback(() => {
-    if (router.canGoBack()) {
-      router.back();
-    } else {
-      translateX.value = 0;
-    }
-  }, [router, translateX]);
-
-  const swipeBackGesture = useMemo(() =>
-    Gesture.Pan()
-      .hitSlop({ left: 0, width: 64 })
-      .activeOffsetX(12)
-      .failOffsetY([-24, 24])
-      .onBegin(() => {
-        swipeCompleting.value = 0;
-      })
-      .onUpdate((event) => {
-        if (event.translationX <= 0) {
-          translateX.value = 0;
-          return;
-        }
-        translateX.value = Math.min(event.translationX, width);
-      })
-      .onEnd((event) => {
-        const shouldComplete = translateX.value > width * 0.33 || event.velocityX > 900;
-        if (shouldComplete) {
-          swipeCompleting.value = 1;
-          translateX.value = withTiming(width, { duration: 200 }, (finished) => {
-            if (finished) {
-              runOnJS(finishSwipeBack)();
-            }
-          });
-        } else {
-          translateX.value = withTiming(0, { duration: 220 });
-        }
-      })
-      .onFinalize(() => {
-        if (swipeCompleting.value === 0) {
-          translateX.value = withTiming(0, { duration: 180 });
-        }
-      })
-  , [finishSwipeBack, swipeCompleting, translateX, width]);
-
-  const combinedGesture = useMemo(() => Gesture.Simultaneous(twoFingerTap, swipeBackGesture), [twoFingerTap, swipeBackGesture]);
-
-  const panAnimatedStyle = useAnimatedStyle(() => ({
-    transform: [{ translateX: translateX.value }],
-    shadowOpacity: translateX.value > 0 ? 0.15 : 0,
-    shadowRadius: translateX.value > 0 ? 8 : 0,
-    shadowColor: '#000',
-    shadowOffset: { width: -2, height: 0 },
-    elevation: translateX.value > 0 ? 6 : 0,
-  }));
 
   function SegmentedOption({ label, selected, onPress, accent }: { label: string; selected: boolean; onPress: () => void; accent: string }) {
     return (
@@ -253,9 +196,8 @@ export default function BrowserScreen() {
   const borderColor = withAlpha(realColor(theme.text), 0.15);
 
   return (
-    <GestureDetector gesture={combinedGesture}>
-      <Animated.View style={[styles.animatedContainer, panAnimatedStyle]}>
-        <Box style={styles.container} backgroundColor="background">
+    <GestureDetector gesture={twoFingerTap}>
+      <Box style={styles.container} backgroundColor="background">
           {/* Offline / error banner for remote pages */}
           {source.type === 'remote' && webBanner && (
             <Box
@@ -432,8 +374,7 @@ export default function BrowserScreen() {
           </Box>
         )}
         </Box>
-      </Animated.View>
-    </GestureDetector>
+      </GestureDetector>
   );
 }
 
@@ -588,9 +529,6 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     gap: 8,
     alignItems: 'center',
-  },
-  animatedContainer: {
-    flex: 1,
   },
   banner: {
     zIndex: 10,
