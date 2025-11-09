@@ -9,7 +9,7 @@ import { Box, Text } from '@/theme/restyle';
 import { Colors } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import type { SavedPage } from '@/lib/cache';
-import { addSavedPage, getSavedPage, updateScrollY } from '@/lib/cache';
+import { addSavedPage, getSavedPage, markPageOpened, updateScrollY } from '@/lib/cache';
 import { cachePageHtml, getCachedPageHtml, preloadPageHtml } from '@/lib/page-html-cache';
 
 type WebViewType = any;
@@ -64,6 +64,7 @@ export default function BrowserScreen() {
   const initialSavedHtml = prefetchedPage && prefetchedPage.mode !== 'online' ? getCachedPageHtml(prefetchedPage.id) : null;
   const [savedHtml, setSavedHtml] = useState<string | null>(initialSavedHtml);
   const [savedHtmlStatus, setSavedHtmlStatus] = useState<'idle' | 'loading' | 'error'>(initialSavedHtml ? 'idle' : 'idle');
+  const lastMarkedPageId = useRef<string | null>(null);
 
   // Load saved page by ID if provided
   useEffect(() => {
@@ -93,6 +94,18 @@ export default function BrowserScreen() {
       cancelled = true;
     };
   }, [params.id, prefetchedPage]);
+
+  useEffect(() => {
+    if (source.type !== 'saved') {
+      lastMarkedPageId.current = null;
+      return;
+    }
+    if (lastMarkedPageId.current === source.page.id) {
+      return;
+    }
+    lastMarkedPageId.current = source.page.id;
+    markPageOpened(source.page.id).catch(() => {});
+  }, [source]);
 
   useEffect(() => {
     try {
@@ -643,7 +656,7 @@ function parseSavedPageParam(raw: unknown): SavedPage | null {
 
 function coerceSavedPage(value: any): SavedPage | null {
   if (!value || typeof value !== 'object') return null;
-  const { id, url, title, savedAt, scrollY, filePath, mode } = value as Partial<SavedPage>;
+  const { id, url, title, savedAt, scrollY, filePath, mode, lastOpenedAt } = value as Partial<SavedPage>;
   if (typeof id !== 'string' || typeof url !== 'string') {
     return null;
   }
@@ -655,6 +668,7 @@ function coerceSavedPage(value: any): SavedPage | null {
     scrollY: typeof scrollY === 'number' && Number.isFinite(scrollY) ? scrollY : Number(scrollY) || 0,
     filePath: typeof filePath === 'string' ? filePath : null,
     mode: mode === 'online' ? 'online' : 'offline',
+    lastOpenedAt: typeof lastOpenedAt === 'number' && Number.isFinite(lastOpenedAt) ? lastOpenedAt : null,
   };
 }
 

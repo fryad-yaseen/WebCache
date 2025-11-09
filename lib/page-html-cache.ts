@@ -32,7 +32,9 @@ export function cachePageHtml(id: string | null | undefined, html: string | null
 }
 
 export async function preloadPageHtml(page: SavedPage | null | undefined): Promise<string | null> {
-  if (!FS_SUPPORTED || !page || !page.id || !page.filePath) return null;
+  if (!FS_SUPPORTED || !page || !page.id) return null;
+  const filePath = page.filePath;
+  if (!filePath) return null;
   const existing = htmlCache.get(page.id);
   if (existing) return existing;
   if (inflight.has(page.id)) {
@@ -40,7 +42,7 @@ export async function preloadPageHtml(page: SavedPage | null | undefined): Promi
   }
   const job = (async () => {
     try {
-      const file = new File(page.filePath);
+      const file = new File(filePath);
       const html = await file.text();
       cachePageHtml(page.id, html);
       return html;

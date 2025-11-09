@@ -7,8 +7,9 @@ export type SavedPage = {
   title: string;
   savedAt: number;
   scrollY: number;
-  filePath?: string | null;
+  filePath: string | null;
   mode: 'offline' | 'online';
+  lastOpenedAt: number | null;
 };
 
 type Manifest = {
@@ -102,6 +103,7 @@ function normalizeSavedPage(page: Partial<SavedPage> | null | undefined): SavedP
     scrollY: typeof page.scrollY === 'number' && Number.isFinite(page.scrollY) ? page.scrollY : 0,
     filePath: typeof page.filePath === 'string' && page.filePath ? page.filePath : null,
     mode: page.mode === 'online' ? 'online' : 'offline',
+    lastOpenedAt: typeof page.lastOpenedAt === 'number' && Number.isFinite(page.lastOpenedAt) ? page.lastOpenedAt : null,
   };
 }
 
@@ -215,6 +217,7 @@ export async function addSavedPage(params: AddSavedPageParams): Promise<SavedPag
     scrollY: params.scrollY || 0,
     filePath,
     mode,
+    lastOpenedAt: null,
   };
   m.pages.push(page);
   manifestIndex.set(page.id, page);
@@ -268,6 +271,31 @@ export async function removeSavedPage(id: string): Promise<void> {
   m.pages.splice(idx, 1);
   manifestIndex.delete(id);
   await persistManifest(m, { immediate: true });
+}
+
+export async function markPageOpened(id: string): Promise<void> {
+  if (!id) return;
+  const manifest = await loadManifest();
+  const page = manifestIndex.get(id);
+  if (!page) {
+    return;
+  }
+  page.lastOpenedAt = Date.now();
+  await persistManifest(manifest, { invalidateSorted: false });
+}
+
+export async function clearRecentOpens(): Promise<void> {
+  const manifest = await loadManifest();
+  let changed = false;
+  for (const page of manifest.pages) {
+    if (typeof page.lastOpenedAt === 'number' && page.lastOpenedAt > 0) {
+      page.lastOpenedAt = null;
+      changed = true;
+    }
+  }
+  if (changed) {
+    await persistManifest(manifest, { invalidateSorted: false });
+  }
 }
 
 export async function initializeCache(): Promise<void> {
