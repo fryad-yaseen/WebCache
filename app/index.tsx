@@ -26,6 +26,8 @@ export default function HomeScreen() {
   const accent = palette.accent;
   const accentContrast = palette.accentContrast ?? '#fff';
   const muted = palette.muted;
+  const softSurface = palette.softSurface ?? palette.surface;
+  const borderColor = palette.border;
 
   const pulse = useCallback(() => {
     Haptics.selectionAsync().catch(() => {});
@@ -107,33 +109,47 @@ export default function HomeScreen() {
     onAction?: () => void;
     disabled?: boolean;
   }) => (
-    <Box style={styles.sectionHeader}>
-      <Text variant="subtitle">{title}</Text>
-      {actionLabel && onAction && (
-        <Pressable
-          onPress={onAction}
-          disabled={disabled}
-          style={({ pressed }) => [
-            styles.textButton,
-            { opacity: disabled ? 0.45 : pressed ? 0.75 : 1, borderColor: accent, backgroundColor: `${accent}1a` },
-          ]}
-        >
-          <Text style={{ color: accent }}>{actionLabel}</Text>
-        </Pressable>
-      )}
+    <Box style={styles.sectionBlock}>
+      <Box style={styles.sectionHeader}>
+        <Text style={styles.sectionTitle}>{title}</Text>
+        {actionLabel && onAction && (
+          <Pressable
+            onPress={onAction}
+            disabled={disabled}
+            style={({ pressed }) => [
+              styles.textButton,
+              {
+                borderColor,
+                backgroundColor: pressed ? palette.subtleBg : 'transparent',
+                opacity: disabled ? 0.4 : 1,
+              },
+            ]}
+          >
+            <Text style={{ color: muted }}>{actionLabel}</Text>
+          </Pressable>
+        )}
+      </Box>
+      <Box style={[styles.sectionRule, { backgroundColor: borderColor }]} />
     </Box>
   );
 
   const EmptyState = ({ message }: { message: string }) => (
-    <Box style={[styles.emptyState, { borderColor: palette.border, backgroundColor: palette.subtleBg }]}>
-      <Text variant="defaultSemiBold">{message}</Text>
+    <Box style={[styles.emptyState, { borderColor, backgroundColor: palette.subtleBg }]}>
+      <Box style={[styles.emptyDot, { backgroundColor: accent }]} />
+      <Text variant="defaultSemiBold" style={{ color: muted }}>
+        {message}
+      </Text>
     </Box>
   );
 
   const renderPageCard = (page: SavedPage, context: 'recent' | 'saved') => {
     const isOnline = page.mode === 'online';
-    const pill =
-      context === 'recent' ? { label: 'Recent', tone: palette.accent } : isOnline ? { label: 'Online', tone: palette.accentMuted } : { label: 'Offline', tone: palette.success };
+    const badge =
+      context === 'recent'
+        ? { label: 'Recent', tone: accent }
+        : isOnline
+          ? { label: 'Online', tone: palette.accentMuted || accent }
+          : { label: 'Offline', tone: palette.success };
     const subtitle = context === 'recent' && page.lastOpenedAt ? `Opened ${formatRelativeTime(page.lastOpenedAt)}` : undefined;
     const onDelete = async () => {
       await removeSavedPage(page.id);
@@ -149,46 +165,46 @@ export default function HomeScreen() {
           styles.pageCard,
           {
             backgroundColor: palette.surface,
-            borderColor: palette.border,
-            shadowColor: palette.cardShadow,
-            opacity: pressed ? 0.92 : 1,
+            borderColor,
+            opacity: pressed ? 0.88 : 1,
           },
         ]}
       >
+        <Box style={[styles.pageMarker, { backgroundColor: badge.tone }]} />
         <Box style={styles.pageMeta}>
-          <Box style={[styles.pill, { backgroundColor: withAlpha(pill.tone, 0.15) }]}>
-            <Text variant="caption" style={{ color: pill.tone }}>
-              {pill.label}
+          <Box style={styles.pageHeaderRow}>
+            <Text style={styles.pageTitle} numberOfLines={1}>
+              {page.title || page.url}
             </Text>
+            <Text style={[styles.pageBadge, { color: badge.tone }]}>{badge.label}</Text>
           </Box>
-          <Text style={styles.pageTitle} numberOfLines={1}>
-            {page.title || page.url}
-          </Text>
-          <Text variant="caption" numberOfLines={1}>
+          <Text variant="caption" numberOfLines={1} style={{ color: muted }}>
             {page.url}
           </Text>
           {subtitle ? (
-            <Text variant="caption" style={{ marginTop: 2 }}>
+            <Text variant="caption" style={{ color: muted }}>
               {subtitle}
             </Text>
           ) : null}
         </Box>
-        {context === 'saved' && (
+        {context === 'saved' ? (
           <Pressable
             onPress={(event) => {
               event.stopPropagation();
               void onDelete();
             }}
             style={({ pressed }) => [
-              styles.iconButton,
+              styles.removeButton,
               {
-                borderColor: palette.border,
-                backgroundColor: pressed ? palette.subtleBg : palette.surface,
+                borderColor,
+                backgroundColor: pressed ? palette.subtleBg : 'transparent',
               },
             ]}
           >
-            <Text style={{ color: palette.danger }}>Delete</Text>
+            <Text style={{ color: palette.danger }}>Remove</Text>
           </Pressable>
+        ) : (
+          <Text style={[styles.pageChevron, { color: muted }]}>›</Text>
         )}
       </Pressable>
     );
@@ -198,24 +214,36 @@ export default function HomeScreen() {
     <Box flex={1} backgroundColor="background">
       <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
         <Box style={styles.screenPadding}>
-          <Box style={styles.headerRow}>
-            <Box style={styles.headerCopy}>
-              <Text variant="title">Library</Text>
-              <Text variant="caption" style={{ color: muted, marginTop: 4 }}>
-                Offline-first cache for the web you care about.
+          <Box style={[styles.hero, { backgroundColor: softSurface, borderColor }]}>
+            <Box style={styles.heroCopy}>
+              <Text variant="label" style={{ color: muted }}>
+                Web Cache
+              </Text>
+              <Text variant="heroTitle" style={styles.heroTitle}>
+                Keep the web close.
+              </Text>
+              <Text variant="heroSubtitle" style={{ color: muted }}>
+                Store the heavy reads you care about in a calm library. Two-finger tap inside the browser to reveal controls.
               </Text>
             </Box>
-            <Box style={[styles.statTile, { backgroundColor: palette.surface, borderColor: palette.border }]}>
+            <Box style={[styles.statTile, { borderColor, backgroundColor: palette.surface }]}>
               <Text style={styles.statValue}>{savedCount}</Text>
-              <Text variant="caption" style={{ marginTop: 2 }}>
-                Saved
+              <Text variant="caption" style={{ color: muted }}>
+                saved
               </Text>
             </Box>
           </Box>
 
-          <Box style={[styles.card, { backgroundColor: palette.surface, borderColor: palette.border }]}>
-            <Text variant="subtitle">Open URL</Text>
-            <Box style={[styles.inputShell, { backgroundColor: bgInput }]}>
+          <Box style={[styles.card, { backgroundColor: palette.surface, borderColor }]}>
+            <Box style={styles.cardHeader}>
+              <Text variant="label" style={{ color: muted }}>
+                New capture
+              </Text>
+              <Text variant="caption" style={{ color: muted }}>
+                Paste or type a URL
+              </Text>
+            </Box>
+            <Box style={[styles.inputShell, { borderColor, backgroundColor: bgInput }]}>
               <TextInput
                 value={input}
                 onChangeText={setInput}
@@ -227,10 +255,19 @@ export default function HomeScreen() {
                 onSubmitEditing={openUrl}
                 style={[styles.input, { color: theme.text }]}
               />
+              <Pressable
+                onPress={openUrl}
+                style={({ pressed }) => [
+                  styles.primaryButton,
+                  { backgroundColor: accent, opacity: pressed ? 0.9 : 1 },
+                ]}
+              >
+                <Text style={{ color: accentContrast, fontWeight: '600' }}>Open</Text>
+              </Pressable>
             </Box>
-            <Pressable onPress={openUrl} style={({ pressed }) => [styles.primaryButton, { backgroundColor: accent, opacity: pressed ? 0.9 : 1 }]}>
-              <Text style={{ color: accentContrast, fontWeight: '600' }}>Go</Text>
-            </Pressable>
+            <Text variant="caption" style={{ color: muted, marginTop: 8 }}>
+              Pages open in a distraction-free view so you can save them offline or keep a lightweight bookmark.
+            </Text>
           </Box>
 
           <SectionHeader
@@ -262,64 +299,92 @@ function normalizeUrl(value: string): string {
 
 const styles = StyleSheet.create({
   scrollContent: {
-    paddingTop: 28,
-    paddingBottom: 36,
+    paddingTop: 32,
+    paddingBottom: 40,
   },
   screenPadding: {
     paddingHorizontal: 20,
   },
-  headerRow: {
+  hero: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
-    gap: 16,
-    marginBottom: 24,
-    alignItems: 'center',
+    gap: 20,
+    padding: 24,
+    borderRadius: 32,
+    borderWidth: StyleSheet.hairlineWidth,
+    alignItems: 'flex-start',
   },
-  headerCopy: {
+  heroCopy: {
     flex: 1,
+    gap: 10,
+  },
+  heroTitle: {
+    fontSize: 32,
+    fontWeight: '600',
   },
   statTile: {
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    borderRadius: 18,
+    paddingHorizontal: 18,
+    paddingVertical: 14,
+    borderRadius: 999,
     borderWidth: StyleSheet.hairlineWidth,
-    minWidth: 90,
     alignItems: 'center',
+    minWidth: 96,
   },
   statValue: {
-    fontSize: 24,
-    fontWeight: '700',
+    fontSize: 28,
+    fontWeight: '600',
+    lineHeight: 32,
   },
   card: {
-    borderRadius: 18,
-    padding: 18,
-    marginBottom: 28,
+    borderRadius: 28,
+    padding: 22,
+    marginTop: 28,
+    marginBottom: 16,
     borderWidth: StyleSheet.hairlineWidth,
+    gap: 16,
+  },
+  cardHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-end',
   },
   inputShell: {
-    marginTop: 12,
-    borderRadius: 14,
-    paddingHorizontal: 16,
-    height: 52,
-    justifyContent: 'center',
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderRadius: 999,
+    borderWidth: StyleSheet.hairlineWidth,
+    paddingHorizontal: 18,
+    height: 56,
+    gap: 12,
   },
   input: {
     flex: 1,
-    height: 52,
-    fontSize: 17,
+    fontSize: 18,
+    fontWeight: '500',
+    paddingVertical: 0,
   },
   primaryButton: {
-    marginTop: 12,
-    borderRadius: 14,
-    height: 48,
+    paddingHorizontal: 22,
+    paddingVertical: 10,
+    borderRadius: 999,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  sectionBlock: {
+    marginTop: 24,
   },
   sectionHeader: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    marginBottom: 16,
+    marginBottom: 10,
+  },
+  sectionTitle: {
+    fontSize: 18,
+    fontWeight: '600',
+  },
+  sectionRule: {
+    height: 1,
+    opacity: 0.35,
   },
   textButton: {
     paddingHorizontal: 14,
@@ -330,37 +395,62 @@ const styles = StyleSheet.create({
   emptyState: {
     borderWidth: StyleSheet.hairlineWidth,
     padding: 16,
-    borderRadius: 18,
+    borderRadius: 22,
     marginBottom: 12,
-  },
-  pageCard: {
-    borderRadius: 18,
-    padding: 16,
-    marginBottom: 12,
-    borderWidth: StyleSheet.hairlineWidth,
     flexDirection: 'row',
     alignItems: 'center',
     gap: 12,
   },
+  emptyDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 999,
+  },
+  pageCard: {
+    borderRadius: 24,
+    paddingVertical: 18,
+    paddingHorizontal: 16,
+    marginBottom: 10,
+    borderWidth: StyleSheet.hairlineWidth,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 16,
+  },
+  pageMarker: {
+    width: 4,
+    alignSelf: 'stretch',
+    borderRadius: 999,
+  },
   pageMeta: {
     flex: 1,
-    gap: 6,
+    gap: 4,
+  },
+  pageHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
   },
   pageTitle: {
     fontWeight: '600',
     fontSize: 17,
+    flex: 1,
   },
-  pill: {
-    alignSelf: 'flex-start',
-    paddingHorizontal: 10,
-    paddingVertical: 2,
-    borderRadius: 999,
+  pageBadge: {
+    fontSize: 12,
+    fontWeight: '600',
+    textTransform: 'uppercase',
+    letterSpacing: 1,
   },
-  iconButton: {
+  removeButton: {
     borderWidth: StyleSheet.hairlineWidth,
-    borderRadius: 14,
-    paddingHorizontal: 12,
+    borderRadius: 999,
+    paddingHorizontal: 14,
     paddingVertical: 8,
+  },
+  pageChevron: {
+    fontSize: 26,
+    lineHeight: 26,
   },
 });
 
@@ -379,12 +469,4 @@ function formatRelativeTime(value: number) {
   const days = Math.floor(hours / 24);
   if (days < 7) return `${days}d ago`;
   return new Date(value).toLocaleDateString();
-}
-
-function withAlpha(color: string, alpha: number) {
-  const hex = (color || '#000000').replace('#', '');
-  const r = parseInt(hex.slice(0, 2), 16) || 0;
-  const g = parseInt(hex.slice(2, 4), 16) || 0;
-  const b = parseInt(hex.slice(4, 6), 16) || 0;
-  return `rgba(${r},${g},${b},${alpha})`;
 }
