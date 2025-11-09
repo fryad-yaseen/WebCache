@@ -8,12 +8,22 @@ import { ThemeProvider as RestyleProvider } from '@shopify/restyle';
 import { darkTheme, lightTheme } from '@/theme/restyle';
 
 import { useColorScheme } from '@/hooks/use-color-scheme';
-import { warmSavedPages } from '@/lib/cache-warmup';
 
 export default function RootLayout() {
   const colorScheme = useColorScheme();
   useEffect(() => {
-    warmSavedPages().catch(() => {});
+    let cancelled = false;
+    (async () => {
+      try {
+        const mod = await import('@/lib/cache-warmup');
+        if (!cancelled) {
+          await mod.warmSavedPages();
+        }
+      } catch {}
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   return (

@@ -1,8 +1,10 @@
-import * as FileSystem from 'expo-file-system';
+import { File } from 'expo-file-system';
+import { Platform } from 'react-native';
 
 import type { SavedPage } from './cache';
 
-const MAX_CACHE_ENTRIES = 6;
+const FS_SUPPORTED = Platform.OS !== 'web';
+export const MAX_CACHE_ENTRIES = 10;
 const htmlCache = new Map<string, string>();
 const inflight = new Map<string, Promise<string | null>>();
 
@@ -30,7 +32,7 @@ export function cachePageHtml(id: string | null | undefined, html: string | null
 }
 
 export async function preloadPageHtml(page: SavedPage | null | undefined): Promise<string | null> {
-  if (!page || !page.id || !page.filePath) return null;
+  if (!FS_SUPPORTED || !page || !page.id || !page.filePath) return null;
   const existing = htmlCache.get(page.id);
   if (existing) return existing;
   if (inflight.has(page.id)) {
@@ -38,7 +40,8 @@ export async function preloadPageHtml(page: SavedPage | null | undefined): Promi
   }
   const job = (async () => {
     try {
-      const html = await FileSystem.readAsStringAsync(page.filePath);
+      const file = new File(page.filePath);
+      const html = await file.text();
       cachePageHtml(page.id, html);
       return html;
     } catch {

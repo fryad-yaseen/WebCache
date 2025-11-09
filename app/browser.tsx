@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Platform, Pressable, StyleSheet, TextInput, View } from 'react-native';
-import * as FileSystem from 'expo-file-system';
+import { Paths } from 'expo-file-system';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import { runOnJS } from 'react-native-reanimated';
 import { useLocalSearchParams, useRouter } from 'expo-router';
@@ -160,6 +160,7 @@ export default function BrowserScreen() {
         : { uri: source.page.filePath })
     : { uri: source.url };
   const injectedBase = useMemo(() => getInjectedBaseScript(savedScrollTarget, savedBaseHref), [savedScrollTarget, savedBaseHref]);
+  const documentDirectoryUri = Platform.OS === 'web' ? undefined : Paths.document.uri;
 
   useEffect(() => {
     setWebCanGoBack(false);
@@ -304,7 +305,7 @@ export default function BrowserScreen() {
               source={webviewSource}
               originWhitelist={["*"]}
               setSupportMultipleWindows={false}
-              allowingReadAccessToURL={shouldUseFileUri ? FileSystem.documentDirectory ?? undefined : undefined}
+              allowingReadAccessToURL={shouldUseFileUri ? documentDirectoryUri : undefined}
               allowFileAccess={shouldUseFileUri}
               allowFileAccessFromFileURLs={shouldUseFileUri}
               style={styles.webview}

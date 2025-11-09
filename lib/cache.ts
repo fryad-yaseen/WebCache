@@ -1,4 +1,5 @@
-import * as FileSystem from 'expo-file-system';
+import { Directory, File, Paths } from 'expo-file-system';
+import { Platform } from 'react-native';
 
 export type SavedPage = {
   id: string;
@@ -13,38 +14,47 @@ type Manifest = {
   pages: SavedPage[];
 };
 
-const ROOT_DIR = FileSystem.documentDirectory + 'webcache/';
-const PAGES_DIR = ROOT_DIR + 'pages/';
-const MANIFEST_PATH = ROOT_DIR + 'manifest.json';
+const IS_NATIVE_FS_AVAILABLE = Platform.OS !== 'web';
+const ROOT_DIR = IS_NATIVE_FS_AVAILABLE ? new Directory(Paths.document, 'webcache') : null;
+const PAGES_DIR = ROOT_DIR ? new Directory(ROOT_DIR, 'pages') : null;
+const MANIFEST_FILE = ROOT_DIR ? new File(ROOT_DIR, 'manifest.json') : null;
 
 let ensuredDirsPromise: Promise<void> | null = null;
 let manifestCache: Manifest | null = null;
 let manifestPromise: Promise<Manifest> | null = null;
+const manifestIndex = new Map<string, SavedPage>();
+let sortedPagesCache: SavedPage[] | null = null;
+let scheduledPersist: ReturnType<typeof setTimeout> | null = null;
 
 async function ensureDirs() {
+  if (!ROOT_DIR || !PAGES_DIR) {
+    return;
+  }
   if (!ensuredDirsPromise) {
-    ensuredDirsPromise = (async () => {
-      const rootInfo = await FileSystem.getInfoAsync(ROOT_DIR);
-      if (!rootInfo.exists) {
-        await FileSystem.makeDirectoryAsync(ROOT_DIR, { intermediates: true });
-      }
-      const pagesInfo = await FileSystem.getInfoAsync(PAGES_DIR);
-      if (!pagesInfo.exists) {
-        await FileSystem.makeDirectoryAsync(PAGES_DIR, { intermediates: true });
-      }
-    })();
+    ensuredDirsPromise = Promise.resolve().then(() => {
+      ensureDirectory(ROOT_DIR);
+      ensureDirectory(PAGES_DIR);
+    });
   }
   return ensuredDirsPromise;
 }
 
+function ensureDirectory(dir: Directory) {
+  if (!dir.exists) {
+    dir.create({ intermediates: true, idempotent: true });
+  }
+}
+
 async function readManifestFromDisk(): Promise<Manifest> {
+  if (!MANIFEST_FILE) {
+    return { pages: [] };
+  }
   await ensureDirs();
-  const info = await FileSystem.getInfoAsync(MANIFEST_PATH);
-  if (!info.exists) {
+  if (!MANIFEST_FILE.exists) {
     return { pages: [] };
   }
   try {
-    const content = await FileSystem.readAsStringAsync(MANIFEST_PATH);
+    const content = await MANIFEST_FILE.text();
     const parsed = JSON.parse(content) as Manifest;
     if (!parsed.pages) return { pages: [] };
     return { pages: parsed.pages.map(clonePage) };
@@ -59,6 +69,8 @@ async function loadManifest(): Promise<Manifest> {
     manifestPromise = (async () => {
       const manifest = await readManifestFromDisk();
       manifestCache = manifest;
+      rebuildManifestIndex(manifest);
+      markSortedPagesDirty();
       manifestPromise = null;
       return manifest;
     })();
@@ -66,14 +78,68 @@ async function loadManifest(): Promise<Manifest> {
   return manifestPromise;
 }
 
-async function persistManifest(manifest: Manifest) {
-  manifestCache = manifest;
-  await ensureDirs();
-  await FileSystem.writeAsStringAsync(MANIFEST_PATH, JSON.stringify(manifest));
-}
-
 function clonePage(page: SavedPage): SavedPage {
   return { ...page };
+}
+
+function rebuildManifestIndex(manifest: Manifest) {
+  manifestIndex.clear();
+  for (const page of manifest.pages) {
+    manifestIndex.set(page.id, page);
+  }
+}
+
+function markSortedPagesDirty() {
+  sortedPagesCache = null;
+}
+
+async function writeManifestToDisk(manifest: Manifest) {
+  if (!MANIFEST_FILE) return;
+  await ensureDirs();
+  MANIFEST_FILE.write(JSON.stringify(manifest));
+}
+
+function scheduleManifestWrite() {
+  if (scheduledPersist) return;
+  scheduledPersist = setTimeout(() => {
+    scheduledPersist = null;
+    const current = manifestCache;
+    if (!current) return;
+    writeManifestToDisk(current).catch(() => {});
+  }, 750);
+}
+
+function cancelScheduledManifestWrite() {
+  if (scheduledPersist) {
+    clearTimeout(scheduledPersist);
+    scheduledPersist = null;
+  }
+}
+
+type PersistOptions = {
+  immediate?: boolean;
+  invalidateSorted?: boolean;
+};
+
+async function persistManifest(manifest: Manifest, options?: PersistOptions) {
+  manifestCache = manifest;
+  rebuildManifestIndex(manifest);
+  if (options?.invalidateSorted !== false) {
+    markSortedPagesDirty();
+  }
+  if (options?.immediate) {
+    cancelScheduledManifestWrite();
+    await writeManifestToDisk(manifest);
+  } else {
+    scheduleManifestWrite();
+  }
+}
+
+function getSortedPages(manifest: Manifest): SavedPage[] {
+  if (!sortedPagesCache) {
+    sortedPagesCache = [...manifest.pages].sort((a, b) => b.savedAt - a.savedAt);
+  }
+  return sortedPagesCache;
 }
 
 function makeId(): string {
@@ -83,15 +149,13 @@ function makeId(): string {
 
 export async function listSavedPages(): Promise<SavedPage[]> {
   const manifest = await loadManifest();
-  return manifest.pages
-    .map(clonePage)
-    .sort((a, b) => b.savedAt - a.savedAt);
+  return getSortedPages(manifest).map(clonePage);
 }
 
 export async function getSavedPage(id: string): Promise<SavedPage | null> {
   if (!id) return null;
-  const manifest = await loadManifest();
-  const page = manifest.pages.find((p) => p.id === id);
+  await loadManifest();
+  const page = manifestIndex.get(id);
   return page ? clonePage(page) : null;
 }
 
@@ -101,10 +165,14 @@ export async function addSavedPage(params: {
   html: string;
   scrollY: number;
 }): Promise<SavedPage> {
+  if (!PAGES_DIR) {
+    throw new Error('Persistent storage is not available on this platform.');
+  }
   await ensureDirs();
   const id = makeId();
-  const filePath = `${PAGES_DIR}${id}.html`;
-  await FileSystem.writeAsStringAsync(filePath, params.html);
+  const pageFile = new File(PAGES_DIR, `${id}.html`);
+  pageFile.write(params.html);
+  const filePath = pageFile.uri;
   const m = await loadManifest();
   const page: SavedPage = {
     id,
@@ -115,23 +183,28 @@ export async function addSavedPage(params: {
     filePath,
   };
   m.pages.push(page);
-  await persistManifest(m);
+  manifestIndex.set(page.id, page);
+  await persistManifest(m, { immediate: true });
   return page;
 }
 
 export async function updateScrollY(id: string, scrollY: number): Promise<void> {
   const manifest = await loadManifest();
-  const idx = manifest.pages.findIndex((p) => p.id === id);
-  if (idx === -1) return;
-  manifest.pages[idx].scrollY = scrollY;
-  await persistManifest(manifest);
+  const page = manifestIndex.get(id);
+  if (!page) return;
+  page.scrollY = scrollY;
+  await persistManifest(manifest, { invalidateSorted: false });
 }
 
 export async function readSavedHtml(id: string): Promise<{ html: string; baseUrl: string | null } | null> {
-  const m = await loadManifest();
-  const page = m.pages.find((p) => p.id === id);
+  if (!IS_NATIVE_FS_AVAILABLE) {
+    return null;
+  }
+  await loadManifest();
+  const page = manifestIndex.get(id);
   if (!page) return null;
-  const html = await FileSystem.readAsStringAsync(page.filePath);
+  const htmlFile = new File(page.filePath);
+  const html = await htmlFile.text();
   // Derive baseUrl from original url's origin, so relative links resolve if online
   try {
     const u = new URL(page.url);
@@ -142,20 +215,28 @@ export async function readSavedHtml(id: string): Promise<{ html: string; baseUrl
 }
 
 export async function removeSavedPage(id: string): Promise<void> {
+  if (!IS_NATIVE_FS_AVAILABLE) {
+    return;
+  }
   const m = await loadManifest();
-  const idx = m.pages.findIndex((p) => p.id === id);
+  const page = manifestIndex.get(id);
+  if (!page) return;
+  const idx = m.pages.indexOf(page);
   if (idx === -1) return;
-  const page = m.pages[idx];
   try {
-    const info = await FileSystem.getInfoAsync(page.filePath);
-    if (info.exists) {
-      await FileSystem.deleteAsync(page.filePath, { idempotent: true });
+    const file = new File(page.filePath);
+    if (file.exists) {
+      file.delete();
     }
   } catch {}
   m.pages.splice(idx, 1);
-  await persistManifest(m);
+  manifestIndex.delete(id);
+  await persistManifest(m, { immediate: true });
 }
 
 export async function initializeCache(): Promise<void> {
+  if (!IS_NATIVE_FS_AVAILABLE) {
+    return;
+  }
   await loadManifest();
 }

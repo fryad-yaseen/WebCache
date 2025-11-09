@@ -8,7 +8,7 @@ import { Colors } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import type { SavedPage } from '@/lib/cache';
 import { listSavedPages, removeSavedPage } from '@/lib/cache';
-import { preloadPageHtml } from '@/lib/page-html-cache';
+import { MAX_CACHE_ENTRIES, preloadPageHtml } from '@/lib/page-html-cache';
 
 export default function HomeScreen() {
   const colorScheme = useColorScheme();
@@ -43,7 +43,8 @@ export default function HomeScreen() {
   }
 
   useEffect(() => {
-    pages.slice(0, 5).forEach((page) => {
+    const maxToWarm = Math.min(MAX_CACHE_ENTRIES, pages.length);
+    pages.slice(0, maxToWarm).forEach((page) => {
       preloadPageHtml(page);
     });
   }, [pages]);
