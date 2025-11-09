@@ -88,6 +88,9 @@ export default function HomeScreen() {
               <Box style={{ flex: 1 }}>
                 <Text numberOfLines={1} style={{ fontWeight: '600' }}>{p.title || p.url}</Text>
                 <Text numberOfLines={1} color="muted" style={{ fontSize: 12 }}>{p.url}</Text>
+                <Text numberOfLines={1} color="muted" style={{ fontSize: 11 }}>
+                  {p.mode === 'online' ? 'Online bookmark (scroll restore only)' : 'Offline snapshot'}
+                </Text>
               </Box>
               <Pressable onPress={() => openSavedPage(p)} style={({ pressed }) => [styles.smallBtn, { backgroundColor: accent, opacity: pressed ? 0.85 : 1 }]}>
                 <Text color="buttonText">Open</Text>

@@ -7,7 +7,8 @@ export type SavedPage = {
   title: string;
   savedAt: number;
   scrollY: number;
-  filePath: string;
+  filePath?: string | null;
+  mode: 'offline' | 'online';
 };
 
 type Manifest = {
@@ -57,7 +58,10 @@ async function readManifestFromDisk(): Promise<Manifest> {
     const content = await MANIFEST_FILE.text();
     const parsed = JSON.parse(content) as Manifest;
     if (!parsed.pages) return { pages: [] };
-    return { pages: parsed.pages.map(clonePage) };
+    const normalized = parsed.pages
+      .map(normalizeSavedPage)
+      .filter((page): page is SavedPage => !!page);
+    return { pages: normalized };
   } catch {
     return { pages: [] };
   }
@@ -80,6 +84,25 @@ async function loadManifest(): Promise<Manifest> {
 
 function clonePage(page: SavedPage): SavedPage {
   return { ...page };
+}
+
+function normalizeSavedPage(page: Partial<SavedPage> | null | undefined): SavedPage | null {
+  if (!page || typeof page !== 'object') {
+    return null;
+  }
+  const { id, url } = page as Partial<SavedPage>;
+  if (typeof id !== 'string' || !id || typeof url !== 'string' || !url) {
+    return null;
+  }
+  return {
+    id,
+    url,
+    title: typeof page.title === 'string' && page.title ? page.title : url,
+    savedAt: typeof page.savedAt === 'number' && Number.isFinite(page.savedAt) ? page.savedAt : Date.now(),
+    scrollY: typeof page.scrollY === 'number' && Number.isFinite(page.scrollY) ? page.scrollY : 0,
+    filePath: typeof page.filePath === 'string' && page.filePath ? page.filePath : null,
+    mode: page.mode === 'online' ? 'online' : 'offline',
+  };
 }
 
 function rebuildManifestIndex(manifest: Manifest) {
@@ -159,20 +182,30 @@ export async function getSavedPage(id: string): Promise<SavedPage | null> {
   return page ? clonePage(page) : null;
 }
 
-export async function addSavedPage(params: {
+type AddSavedPageParams = {
   url: string;
   title: string;
-  html: string;
+  html?: string;
   scrollY: number;
-}): Promise<SavedPage> {
-  if (!PAGES_DIR) {
+  mode?: 'offline' | 'online';
+};
+
+export async function addSavedPage(params: AddSavedPageParams): Promise<SavedPage> {
+  const mode: 'offline' | 'online' = params.mode === 'online' ? 'online' : 'offline';
+  if (mode === 'offline' && !PAGES_DIR) {
     throw new Error('Persistent storage is not available on this platform.');
+  }
+  if (mode === 'offline' && !params.html) {
+    throw new Error('HTML content is required for offline saves.');
   }
   await ensureDirs();
   const id = makeId();
-  const pageFile = new File(PAGES_DIR, `${id}.html`);
-  pageFile.write(params.html);
-  const filePath = pageFile.uri;
+  let filePath: string | null = null;
+  if (mode === 'offline' && PAGES_DIR) {
+    const pageFile = new File(PAGES_DIR, `${id}.html`);
+    pageFile.write(params.html as string);
+    filePath = pageFile.uri;
+  }
   const m = await loadManifest();
   const page: SavedPage = {
     id,
@@ -181,6 +214,7 @@ export async function addSavedPage(params: {
     savedAt: Date.now(),
     scrollY: params.scrollY || 0,
     filePath,
+    mode,
   };
   m.pages.push(page);
   manifestIndex.set(page.id, page);
@@ -202,7 +236,7 @@ export async function readSavedHtml(id: string): Promise<{ html: string; baseUrl
   }
   await loadManifest();
   const page = manifestIndex.get(id);
-  if (!page) return null;
+  if (!page || page.mode !== 'offline' || !page.filePath) return null;
   const htmlFile = new File(page.filePath);
   const html = await htmlFile.text();
   // Derive baseUrl from original url's origin, so relative links resolve if online
@@ -224,9 +258,11 @@ export async function removeSavedPage(id: string): Promise<void> {
   const idx = m.pages.indexOf(page);
   if (idx === -1) return;
   try {
-    const file = new File(page.filePath);
-    if (file.exists) {
-      file.delete();
+    if (page.filePath) {
+      const file = new File(page.filePath);
+      if (file.exists) {
+        file.delete();
+      }
     }
   } catch {}
   m.pages.splice(idx, 1);

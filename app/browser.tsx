@@ -14,6 +14,22 @@ import { cachePageHtml, getCachedPageHtml, preloadPageHtml } from '@/lib/page-ht
 
 type WebViewType = any;
 
+type ResourceResponseMessage = {
+  id: string;
+  success: boolean;
+  body?: string | null;
+  dataUrl?: string | null;
+  mime?: string | null;
+  error?: string | null;
+};
+
+type ResourceRequestPayload = {
+  id: string;
+  url: string;
+  responseType?: 'text' | 'data-url';
+  headers?: Record<string, string> | null;
+};
+
 export default function BrowserScreen() {
   const colorScheme = useColorScheme();
   const theme = Colors[colorScheme ?? 'light'];
@@ -26,8 +42,10 @@ export default function BrowserScreen() {
   const [overlayVisible, setOverlayVisible] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveMode, setSaveMode] = useState<'device' | 'light' | 'dark'>('device');
+  const [saveType, setSaveType] = useState<'offline' | 'online'>('offline');
   const [webCanGoBack, setWebCanGoBack] = useState(false);
   const [webCanGoForward, setWebCanGoForward] = useState(false);
+  const [currentNavMeta, setCurrentNavMeta] = useState<{ url: string; title: string }>({ url: initialUrl, title: '' });
 
   type Source = { type: 'remote'; url: string } | { type: 'saved'; page: SavedPage };
   const [source, setSource] = useState<Source>(() => {
@@ -43,7 +61,7 @@ export default function BrowserScreen() {
   const [, setWebLoading] = useState<boolean>(false);
   const lastScrollRef = useRef(0);
   const scrollPersistTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const initialSavedHtml = prefetchedPage ? getCachedPageHtml(prefetchedPage.id) : null;
+  const initialSavedHtml = prefetchedPage && prefetchedPage.mode !== 'online' ? getCachedPageHtml(prefetchedPage.id) : null;
   const [savedHtml, setSavedHtml] = useState<string | null>(initialSavedHtml);
   const [savedHtmlStatus, setSavedHtmlStatus] = useState<'idle' | 'loading' | 'error'>(initialSavedHtml ? 'idle' : 'idle');
 
@@ -128,9 +146,9 @@ export default function BrowserScreen() {
     } catch {}
   }, [webCanGoForward]);
 
-  function SegmentedOption({ label, selected, onPress, accent }: { label: string; selected: boolean; onPress: () => void; accent: string }) {
+  function SegmentedOption({ label, selected, onPress, accent, disabled = false }: { label: string; selected: boolean; onPress: () => void; accent: string; disabled?: boolean }) {
     return (
-      <Pressable onPress={onPress} style={({ pressed }) => [
+      <Pressable onPress={onPress} disabled={disabled} style={({ pressed }) => [
         {
           height: 32,
           paddingHorizontal: 12,
@@ -140,7 +158,7 @@ export default function BrowserScreen() {
           borderWidth: 1,
           borderColor: selected ? accent : 'rgba(125,125,125,0.4)',
           backgroundColor: selected ? accent : 'transparent',
-          opacity: pressed ? 0.85 : 1,
+          opacity: disabled ? 0.45 : pressed ? 0.85 : 1,
         },
       ]}>
         <Text style={selected ? { color: '#fff' } : undefined}>{label}</Text>
@@ -148,25 +166,28 @@ export default function BrowserScreen() {
     );
   }
 
-  const savedScrollTarget = source.type === 'saved' ? source.page.scrollY : 0;
-  const savedPageUrl = source.type === 'saved' ? source.page.url : null;
-  const savedBaseHref = source.type === 'saved' ? getBaseHref(source.page.url) : null;
-  const shouldUseFileUri = source.type === 'saved' && !savedHtml && savedHtmlStatus === 'error';
+  const isSavedPage = source.type === 'saved';
+  const isSavedOnline = isSavedPage && source.page.mode === 'online';
+  const isSavedOffline = isSavedPage && !isSavedOnline;
+  const savedScrollTarget = isSavedPage ? source.page.scrollY : 0;
+  const savedPageUrl = isSavedPage ? source.page.url : null;
+  const savedBaseHref = isSavedOffline ? getBaseHref(source.page.url) : null;
+  const shouldUseFileUri = isSavedOffline && !savedHtml && savedHtmlStatus === 'error' && !!source.page.filePath;
   const webviewSource = source.type === 'saved'
-    ? (savedHtml
-        ? { html: savedHtml, baseUrl: savedPageUrl ?? savedBaseHref ?? undefined }
-        : (savedHtmlStatus === 'error' ? { uri: source.page.filePath } : null))
+    ? (isSavedOnline
+        ? { uri: source.page.url }
+        : (savedHtml
+            ? { html: savedHtml, baseUrl: savedPageUrl ?? savedBaseHref ?? undefined }
+            : (savedHtmlStatus === 'error' && source.page.filePath ? { uri: source.page.filePath } : null)))
     : { uri: source.url };
   const injectedBase = useMemo(() => getInjectedBaseScript(savedScrollTarget, savedBaseHref), [savedScrollTarget, savedBaseHref]);
   const documentDirectoryUri = Platform.OS === 'web' ? undefined : Paths.document.uri;
   const handleShouldStartLoadWithRequest = useCallback((request: any) => {
-    if (source.type !== 'saved') {
-      debugLog('Allowing remote navigation', request?.url);
+    if (source.type !== 'saved' || source.page.mode === 'online') {
       return true;
     }
     const url: string = typeof request?.url === 'string' ? request.url : '';
     if (!url) {
-      debugLog('Blocked navigation: missing URL in request while viewing snapshot');
       return false;
     }
     const normalized = url.split('#')[0];
@@ -175,56 +196,61 @@ export default function BrowserScreen() {
       normalized.startsWith('file://') ||
       normalized.startsWith('data:')
     ) {
-      debugLog('Allowing internal snapshot navigation', normalized);
       return true;
     }
-    debugLog('Blocked external navigation from snapshot', { url: normalized, savedHtmlStatus });
     if (!webBanner || webBanner.type !== 'info') {
       setWebBanner({ type: 'info', message: 'Viewing an offline snapshot. Use Go to browse live pages.' });
     }
     return false;
-  }, [source, webBanner, savedHtmlStatus]);
+  }, [source, webBanner]);
 
   useEffect(() => {
-    debugLog('Source changed', source.type === 'saved' ? { type: 'saved', id: source.page.id, url: source.page.url } : { type: 'remote', url: source.url });
     setWebCanGoBack(false);
     setWebCanGoForward(false);
-    setWebBanner(null);
+    if (isSavedOnline) {
+      setWebBanner({ type: 'info', message: 'Online bookmark. Connect to the internet to view; scroll position will be restored.' });
+    } else {
+      setWebBanner(null);
+    }
+  }, [source, isSavedOnline]);
+
+  useEffect(() => {
+    if (source.type === 'saved') {
+      setCurrentNavMeta((prev) => ({
+        url: source.page.url || prev.url,
+        title: source.page.title || prev.title,
+      }));
+    }
   }, [source]);
 
   useEffect(() => {
-    if (source.type !== 'saved') {
-      debugLog('Exiting saved mode, clearing snapshot state');
+    if (!isSavedOffline) {
       setSavedHtml(null);
       setSavedHtmlStatus('idle');
       return;
     }
     const existing = getCachedPageHtml(source.page.id);
     if (existing) {
-      debugLog('Using cached HTML for saved page', source.page.id);
       setSavedHtml(existing);
       setSavedHtmlStatus('idle');
       return;
     }
     let cancelled = false;
-    debugLog('Preloading saved HTML for', source.page.id);
     setSavedHtml(null);
     setSavedHtmlStatus('loading');
     preloadPageHtml(source.page).then((html) => {
       if (cancelled) return;
       if (html) {
-        debugLog('Loaded saved HTML', { id: source.page.id, bytes: html.length });
         setSavedHtml(html);
         setSavedHtmlStatus('idle');
       } else {
-        debugLog('Failed to load saved HTML', source.page.id);
         setSavedHtmlStatus('error');
       }
     });
     return () => {
       cancelled = true;
     };
-  }, [source]);
+  }, [source, isSavedOffline]);
 
   // Live preview of theme choice before saving (remote pages only)
   useEffect(() => {
@@ -247,12 +273,55 @@ export default function BrowserScreen() {
     webRef.current.injectJavaScript(apply);
   }, [saveMode, colorScheme, source]);
 
+  const handleResourceRequest = useCallback((payload: ResourceRequestPayload) => {
+    if (!payload || typeof payload.id !== 'string' || typeof payload.url !== 'string') {
+      return;
+    }
+    const { id, url } = payload;
+    const responseType = payload.responseType === 'data-url' ? 'data-url' : 'text';
+    const headers = payload.headers ?? undefined;
+    const respond = (message: ResourceResponseMessage) => {
+      if (!webRef.current) return;
+      const js = `
+        try {
+          if (window.__rn_receiveResourceResponse) {
+            window.__rn_receiveResourceResponse(${JSON.stringify(message)});
+          }
+        } catch (e) {}
+        true;
+      `;
+      try {
+        // @ts-ignore
+        webRef.current.injectJavaScript(js);
+      } catch {}
+    };
+    (async () => {
+      try {
+        const res = await fetch(url, {
+          headers,
+        });
+        if (!res.ok) {
+          throw new Error(`HTTP ${res.status}`);
+        }
+        const mime = typeof res.headers?.get === 'function' ? res.headers.get('content-type') : null;
+        if (responseType === 'data-url') {
+          const buffer = await res.arrayBuffer();
+          const base64 = arrayBufferToBase64(buffer);
+          const dataUrl = `data:${mime ?? 'application/octet-stream'};base64,${base64}`;
+          respond({ id, success: true, dataUrl, mime });
+        } else {
+          const text = await res.text();
+          respond({ id, success: true, body: text, mime });
+        }
+      } catch (err: any) {
+        respond({ id, success: false, error: err?.message ?? String(err) });
+      }
+    })();
+  }, []);
+
   const handleMessage = useCallback(async (event: any) => {
     try {
       const data = JSON.parse(event?.nativeEvent?.data ?? '{}');
-      if (data?.type && data.type !== 'SCROLL') {
-        debugLog('WebView message', data.type, data.payload ? Object.keys(data.payload) : 'no payload');
-      }
       if (data?.type === 'SCROLL') {
         const y = Number(data?.payload?.y || 0);
         lastScrollRef.current = y;
@@ -269,33 +338,68 @@ export default function BrowserScreen() {
       } else if (data?.type === 'PAGE_SNAPSHOT') {
         const { html, title, url, scrollY } = data.payload || {};
         if (!html || !url) return;
-        debugLog('Saving snapshot', url, 'size', html.length);
-        const saved = await addSavedPage({ html, title: title || url, url, scrollY: Number(scrollY || 0) });
+        const saved = await addSavedPage({ html, title: title || url, url, scrollY: Number(scrollY || 0), mode: 'offline' });
         cachePageHtml(saved.id, html);
         setSaving(false);
+        setOverlayVisible(false);
       } else if (data?.type === 'ERROR') {
-        debugLog('Snapshot error payload', data?.payload);
         setSaving(false);
+      } else if (data?.type === 'RESOURCE_REQUEST') {
+        handleResourceRequest(data.payload);
       }
     } catch {
       // ignore parse errors
     }
-  }, [source]);
+  }, [source, handleResourceRequest]);
 
-  const requestSave = useCallback(() => {
+  const requestOfflineSave = useCallback(() => {
     if (!WebViewImpl || !webRef.current) return;
     setSaving(true);
-    debugLog('Requesting snapshot capture', { mode: saveMode, colorScheme });
     const opts = JSON.stringify({ mode: saveMode, deviceDark: colorScheme === 'dark' });
     const cmd = `(() => { try { if (window.__rn_savePage) { window.__rn_savePage(${opts}); } } catch (e) {} })(); true;`;
     // @ts-ignore
     webRef.current.injectJavaScript(cmd);
   }, [WebViewImpl, saveMode, colorScheme]);
 
+  const saveOnlineBookmark = useCallback(async () => {
+    const fallbackUrl = source.type === 'remote' ? source.url : source.type === 'saved' ? source.page.url : initialUrl;
+    const targetUrl = currentNavMeta.url && currentNavMeta.url !== 'about:blank' ? currentNavMeta.url : fallbackUrl;
+    if (!targetUrl) {
+      setWebBanner({ type: 'error', message: 'Unable to determine the current URL to save.' });
+      return;
+    }
+    setSaving(true);
+    try {
+      await addSavedPage({
+        url: targetUrl,
+        title: currentNavMeta.title || targetUrl,
+        scrollY: lastScrollRef.current,
+        mode: 'online',
+      });
+      setOverlayVisible(false);
+      setWebBanner({ type: 'info', message: 'Saved online bookmark. Scroll position will restore next time.' });
+    } catch {
+      setWebBanner({ type: 'error', message: 'Unable to save online bookmark.' });
+    } finally {
+      setSaving(false);
+    }
+  }, [currentNavMeta, initialUrl, source]);
+
+  const handleSavePress = useCallback(() => {
+    if (saving) return;
+    if (saveType === 'online') {
+      saveOnlineBookmark();
+    } else {
+      requestOfflineSave();
+    }
+  }, [saveType, saveOnlineBookmark, requestOfflineSave, saving]);
+
   const overlayDim = withAlpha(realColor(theme.text), colorScheme === 'dark' ? 0.5 : 0.35);
   const accent = colorScheme === 'dark' ? '#3b82f6' : theme.tint;
   const subtleBg = colorScheme === 'dark' ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)';
   const borderColor = withAlpha(realColor(theme.text), 0.15);
+  const saveButtonLabel = saving ? 'Saving…' : (saveType === 'online' ? 'Save Online' : 'Save Offline');
+  const saveButtonDisabled = saving || (saveType === 'offline' && !WebViewImpl);
 
   return (
     <GestureDetector gesture={twoFingerTap}>
@@ -379,6 +483,10 @@ export default function BrowserScreen() {
               onNavigationStateChange={(navState: any) => {
                 setWebCanGoBack(!!navState?.canGoBack);
                 setWebCanGoForward(!!navState?.canGoForward);
+                setCurrentNavMeta((prev) => ({
+                  url: typeof navState?.url === 'string' && navState.url ? navState.url : prev.url,
+                  title: typeof navState?.title === 'string' ? navState.title : prev.title,
+                }));
               }}
               onShouldStartLoadWithRequest={handleShouldStartLoadWithRequest}
             />
@@ -435,9 +543,16 @@ export default function BrowserScreen() {
                     </Pressable>
                   </Box>
                   <Box flexDirection="row" alignItems="center" style={styles.controlsRow}>
-                    <SegmentedOption label="Device" selected={saveMode==='device'} onPress={() => setSaveMode('device')} accent={accent} />
-                    <SegmentedOption label="Light" selected={saveMode==='light'} onPress={() => setSaveMode('light')} accent={accent} />
-                    <SegmentedOption label="Dark" selected={saveMode==='dark'} onPress={() => setSaveMode('dark')} accent={accent} />
+                    <SegmentedOption label="Offline" selected={saveType==='offline'} onPress={() => setSaveType('offline')} accent={accent} />
+                    <SegmentedOption label="Online" selected={saveType==='online'} onPress={() => setSaveType('online')} accent={accent} />
+                  </Box>
+                  <Text style={{ fontSize: 12, opacity: 0.8 }}>
+                    Offline saves cache the entire page for offline viewing. Online saves keep scroll position but require internet.
+                  </Text>
+                  <Box flexDirection="row" alignItems="center" style={styles.controlsRow}>
+                    <SegmentedOption label="Device" selected={saveMode==='device'} onPress={() => setSaveMode('device')} accent={accent} disabled={saveType==='online'} />
+                    <SegmentedOption label="Light" selected={saveMode==='light'} onPress={() => setSaveMode('light')} accent={accent} disabled={saveType==='online'} />
+                    <SegmentedOption label="Dark" selected={saveMode==='dark'} onPress={() => setSaveMode('dark')} accent={accent} disabled={saveType==='online'} />
                   </Box>
                   <Box flexDirection="row" alignItems="center" style={styles.controlsRow}>
                     <Pressable
@@ -468,8 +583,8 @@ export default function BrowserScreen() {
                     </Pressable>
                   </Box>
                   <Box flexDirection="row" alignItems="center" style={styles.controlsRow}>
-                    <Pressable onPress={requestSave} disabled={!WebViewImpl || saving} style={({ pressed }) => [styles.button, { backgroundColor: saving ? '#6b7280' : accent, opacity: pressed ? 0.85 : 1 }]}>
-                      <Text color="buttonText">{saving ? 'Saving…' : 'Save'}</Text>
+                    <Pressable onPress={handleSavePress} disabled={saveButtonDisabled} style={({ pressed }) => [styles.button, { backgroundColor: saveButtonDisabled ? '#6b7280' : accent, opacity: pressed ? 0.85 : 1 }]}>
+                      <Text color="buttonText">{saveButtonLabel}</Text>
                     </Pressable>
                     <Pressable onPress={() => router.back()} style={({ pressed }) => [styles.button, { backgroundColor: colorScheme==='dark' ? '#2d2d2d' : '#444', opacity: pressed ? 0.85 : 1 }]}>
                       <Text color="buttonText">Exit</Text>
@@ -509,16 +624,6 @@ function normalizeUrl(value: string): string {
   }
 }
 
-function debugLog(...args: any[]): void {
-  if (typeof __DEV__ !== 'undefined' && !__DEV__) {
-    return;
-  }
-  try {
-    // eslint-disable-next-line no-console
-    console.log('[Browser]', ...args);
-  } catch {}
-}
-
 function realColor(color: string): string { return color || '#000000'; }
 function parseSavedPageParam(raw: unknown): SavedPage | null {
   if (typeof raw !== 'string' || !raw) return null;
@@ -538,8 +643,8 @@ function parseSavedPageParam(raw: unknown): SavedPage | null {
 
 function coerceSavedPage(value: any): SavedPage | null {
   if (!value || typeof value !== 'object') return null;
-  const { id, url, title, savedAt, scrollY, filePath } = value as Partial<SavedPage>;
-  if (typeof id !== 'string' || typeof url !== 'string' || typeof filePath !== 'string') {
+  const { id, url, title, savedAt, scrollY, filePath, mode } = value as Partial<SavedPage>;
+  if (typeof id !== 'string' || typeof url !== 'string') {
     return null;
   }
   return {
@@ -548,7 +653,8 @@ function coerceSavedPage(value: any): SavedPage | null {
     title: typeof title === 'string' ? title : url,
     savedAt: typeof savedAt === 'number' && Number.isFinite(savedAt) ? savedAt : Date.now(),
     scrollY: typeof scrollY === 'number' && Number.isFinite(scrollY) ? scrollY : Number(scrollY) || 0,
-    filePath,
+    filePath: typeof filePath === 'string' ? filePath : null,
+    mode: mode === 'online' ? 'online' : 'offline',
   };
 }
 
@@ -584,6 +690,28 @@ function withAlpha(color: string, alpha: number): string {
   return `rgba(${r},${g},${b},${alpha})`;
 }
 
+const BASE64_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=';
+
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  let output = '';
+  for (let i = 0; i < bytes.length; i += 3) {
+    const a = bytes[i];
+    const b = i + 1 < bytes.length ? bytes[i + 1] : 0;
+    const c = i + 2 < bytes.length ? bytes[i + 2] : 0;
+    const triple = (a << 16) | (b << 8) | c;
+    const enc1 = (triple >> 18) & 63;
+    const enc2 = (triple >> 12) & 63;
+    const enc3 = (triple >> 6) & 63;
+    const enc4 = triple & 63;
+    output += BASE64_CHARS.charAt(enc1);
+    output += BASE64_CHARS.charAt(enc2);
+    output += i + 1 < bytes.length ? BASE64_CHARS.charAt(enc3) : '=';
+    output += i + 2 < bytes.length ? BASE64_CHARS.charAt(enc4) : '=';
+  }
+  return output;
+}
+
 function getInjectedBaseScript(initialScrollY: number, savedBaseHref: string | null) {
   const code = `
     (function(){
@@ -591,8 +719,53 @@ function getInjectedBaseScript(initialScrollY: number, savedBaseHref: string | n
         var RNWV = {
           send: function(type, payload){ try { window.ReactNativeWebView && window.ReactNativeWebView.postMessage(JSON.stringify({type: type, payload: payload||{}})); } catch (e) {} }
         };
+        var __rn_resourceSeq = 0;
+        var __rn_resourceResolvers = Object.create(null);
+        RNWV.requestResource = function(request){
+          return new Promise(function(resolve, reject){
+            try {
+              if (!request || !request.url || !window.ReactNativeWebView) {
+                reject(new Error('native bridge unavailable'));
+                return;
+              }
+              var id = 'res_'+Date.now()+'_'+(++__rn_resourceSeq);
+              __rn_resourceResolvers[id] = { resolve: resolve, reject: reject };
+              RNWV.send('RESOURCE_REQUEST', {
+                id: id,
+                url: request.url,
+                responseType: request.responseType || 'text',
+                headers: request && request.headers ? request.headers : null
+              });
+            } catch (err) {
+              reject(err);
+            }
+          });
+        };
+        window.__rn_receiveResourceResponse = function(message){
+          try {
+            if (!message || !message.id) return;
+            var resolver = __rn_resourceResolvers[message.id];
+            if (!resolver) return;
+            delete __rn_resourceResolvers[message.id];
+            if (message.success) {
+              resolver.resolve(message);
+            } else {
+              resolver.reject(message.error || 'Resource failed');
+            }
+          } catch (e) {}
+        };
         var throttle = function(fn, ms){ var t=0; return function(){ var now=Date.now(); if(now-t>ms){ t=now; try{ fn.apply(this, arguments);}catch(e){} } } };
         window.addEventListener('scroll', throttle(function(){ RNWV.send('SCROLL', { y: window.scrollY, x: window.scrollX, url: location.href }); }, 250), { passive: true });
+
+        function makeRefererHeaders(){
+          try {
+            var href = location.href;
+            if (href && typeof href === 'string') {
+              return { Referer: href };
+            }
+          } catch (e) {}
+          return null;
+        }
 
         var baseHref = ${savedBaseHref ? JSON.stringify(savedBaseHref) : 'null'};
         if (baseHref) {
@@ -640,31 +813,209 @@ function getInjectedBaseScript(initialScrollY: number, savedBaseHref: string | n
           var imgs = Array.prototype.slice.call(doc.querySelectorAll('img[src]'));
           for (var i=0;i<imgs.length;i++){
             var img = imgs[i];
-            try {
-              var res = await fetch(img.src, { credentials: 'include' });
-              var blob = await res.blob();
-              var reader = new FileReader();
-              var p = new Promise(function(resolve){ reader.onloadend = resolve; });
-              reader.readAsDataURL(blob);
-              await p;
-              img.setAttribute('src', reader.result);
-              img.removeAttribute('srcset');
-            } catch (e) {}
+            var url = img.getAttribute('src') || img.src;
+            var dataUrl = await fetchImageDataUrl(url);
+            if (!dataUrl) continue;
+            img.setAttribute('src', dataUrl);
+            img.removeAttribute('srcset');
           }
         }
 
+        async function fetchImageDataUrl(url){
+          return fetchResourceDataUrl(url);
+        }
+
+        function blobToDataUrl(blob){
+          return new Promise(function(resolve, reject){
+            try {
+              var reader = new FileReader();
+              reader.onloadend = function(){ resolve(reader.result); };
+              reader.onerror = function(){ reject(new Error('read error')); };
+              reader.readAsDataURL(blob);
+            } catch (e) {
+              reject(e);
+            }
+          });
+        }
+
         async function inlineStylesheets(doc){
-          var links = Array.prototype.slice.call(doc.querySelectorAll('link[rel="stylesheet"][href]'));
+          var links = Array.prototype.slice.call(doc.querySelectorAll('link[href]'));
+          var cssCache = Object.create(null);
+          var cssAssetCache = Object.create(null);
           for (var i=0;i<links.length;i++){
             var link = links[i];
-            try {
-              var res = await fetch(link.href, { credentials: 'include' });
-              var css = await res.text();
-              var style = doc.createElement('style');
-              style.textContent = css;
-              link.parentNode && link.parentNode.replaceChild(style, link);
-            } catch (e) {}
+            var relRaw = (link.getAttribute('rel') || '').toLowerCase();
+            var tokens = relRaw.split(/\\s+/).filter(Boolean);
+            var isStylesheet = tokens.indexOf('stylesheet') !== -1 || (tokens.indexOf('preload') !== -1 && ((link.getAttribute('as') || '').toLowerCase() === 'style'));
+            if (!isStylesheet) continue;
+            var css = await fetchStylesheetText(link.href, cssCache, link.href, cssAssetCache);
+            if (!css) continue;
+            var style = doc.createElement('style');
+            style.textContent = css;
+            style.setAttribute('data-rnwc-inline', '1');
+            var media = link.getAttribute('media');
+            if (media) {
+              style.setAttribute('media', media);
+            }
+            link.parentNode && link.parentNode.replaceChild(style, link);
           }
+        }
+
+        async function fetchStylesheetText(url, cache, relativeTo, assetCache){
+          var resolved = resolveResourceUrl(url, relativeTo);
+          if (!resolved) return null;
+          cache = cache || Object.create(null);
+          if (cache[resolved]) {
+            return cache[resolved];
+          }
+          var job = (async function(){
+            var css = await fetchCssRaw(resolved);
+            if (!css) return null;
+            css = await inlineCssImports(css, resolved, cache, assetCache);
+            css = await inlineCssAssetUrls(css, resolved, assetCache);
+            return css;
+          })();
+          cache[resolved] = job;
+          return await job;
+        }
+
+        async function inlineCssImports(cssText, baseUrl, cache, assetCache){
+          if (!cssText || cssText.indexOf('@import') === -1) return cssText;
+          var regex = /@import\\s+(?:url\\()?['"]?([^"')]+)['"]?(?:\\))?\\s*([^;]*);/gi;
+          var result = '';
+          var lastIndex = 0;
+          var match;
+          while ((match = regex.exec(cssText)) !== null) {
+            result += cssText.slice(lastIndex, match.index);
+            lastIndex = regex.lastIndex;
+            var target = (match[1] || '').trim();
+            if (!target) {
+              result += cssText.slice(match.index, match.index + match[0].length);
+              continue;
+            }
+            var media = (match[2] || '').trim();
+            var absolute = resolveResourceUrl(target, baseUrl);
+            if (!absolute) {
+              result += cssText.slice(match.index, match.index + match[0].length);
+              continue;
+            }
+            var imported = await fetchStylesheetText(absolute, cache, baseUrl, assetCache);
+            if (!imported) {
+              result += cssText.slice(match.index, match.index + match[0].length);
+              continue;
+            }
+            if (media) {
+              result += '@media ' + media + '{' + imported + '}';
+            } else {
+              result += imported;
+            }
+          }
+          result += cssText.slice(lastIndex);
+          return result;
+        }
+
+        function resolveResourceUrl(value, relativeTo){
+          if (!value) return null;
+          try {
+            if (relativeTo) {
+              return new URL(value, relativeTo).toString();
+            }
+            return new URL(value).toString();
+          } catch (err) {
+            try {
+              return new URL(value, location.href).toString();
+            } catch (e) {
+              return null;
+            }
+          }
+        }
+
+        async function fetchCssRaw(url){
+          try {
+            var res = await fetch(url, { credentials: 'include' });
+            if (!res.ok) throw new Error('bad status');
+            return await res.text();
+          } catch (err) {
+            if (typeof RNWV.requestResource === 'function') {
+              try {
+                var nativeCss = await RNWV.requestResource({ url: url, responseType: 'text', headers: makeRefererHeaders() });
+                if (nativeCss && typeof nativeCss.body === 'string') {
+                  return nativeCss.body;
+                }
+              } catch (nativeErr) {}
+            }
+          }
+          return null;
+        }
+
+        async function inlineCssAssetUrls(cssText, baseUrl, assetCache){
+          if (!cssText || cssText.indexOf('url(') === -1) return cssText;
+          assetCache = assetCache || Object.create(null);
+          var regex = /url\\(\\s*(['"]?)([^'")]+)\\1\\s*\\)/gi;
+          var result = '';
+          var lastIndex = 0;
+          var match;
+          while ((match = regex.exec(cssText)) !== null) {
+            result += cssText.slice(lastIndex, match.index);
+            lastIndex = regex.lastIndex;
+            var target = (match[2] || '').trim();
+            if (!target) {
+              result += match[0];
+              continue;
+            }
+            var lowered = target.toLowerCase();
+            if (lowered.startsWith('data:') || lowered.startsWith('blob:') || lowered.startsWith('javascript:') || lowered.startsWith('about:')) {
+              result += match[0];
+              continue;
+            }
+            if (target.startsWith('#')) {
+              result += match[0];
+              continue;
+            }
+            var absolute = resolveResourceUrl(target, baseUrl);
+            if (!absolute) {
+              result += match[0];
+              continue;
+            }
+            var inlineData = await fetchCssAssetDataUrl(absolute, assetCache);
+            if (inlineData) {
+              result += 'url("' + inlineData + '")';
+            } else {
+              result += 'url("' + absolute + '")';
+            }
+          }
+          result += cssText.slice(lastIndex);
+          return result;
+        }
+
+        async function fetchCssAssetDataUrl(url, cache){
+          cache = cache || Object.create(null);
+          if (cache[url]) {
+            return cache[url];
+          }
+          var job = fetchResourceDataUrl(url);
+          cache[url] = job;
+          return await job;
+        }
+
+        async function fetchResourceDataUrl(url){
+          if (!url) return null;
+          try {
+            var res = await fetch(url, { credentials: 'include' });
+            if (!res.ok) throw new Error('bad status');
+            var blob = await res.blob();
+            return await blobToDataUrl(blob);
+          } catch (err) {
+            if (typeof RNWV.requestResource === 'function') {
+              try {
+                var nativeRes = await RNWV.requestResource({ url: url, responseType: 'data-url', headers: makeRefererHeaders() });
+                if (nativeRes && typeof nativeRes.dataUrl === 'string') {
+                  return nativeRes.dataUrl;
+                }
+              } catch (nativeErr) {}
+            }
+          }
+          return null;
         }
 
         function stripScripts(root){
@@ -672,7 +1023,23 @@ function getInjectedBaseScript(initialScrollY: number, savedBaseHref: string | n
             var scripts = Array.prototype.slice.call(root.querySelectorAll('script'));
             for (var i=0;i<scripts.length;i++){
               var script = scripts[i];
-              if (script && script.parentNode) {
+              if (!script || !script.parentNode) continue;
+              var type = (script.getAttribute('type') || '').trim().toLowerCase();
+              var hasSrc = script.hasAttribute('src');
+              var isJsonLike = type && (type.indexOf('json') !== -1 || type.indexOf('ld+json') !== -1);
+              if (isJsonLike) continue;
+              var shouldRemove = false;
+              if (hasSrc) {
+                shouldRemove = true;
+              } else if (type === 'module' || type === 'text/module' || type === 'application/javascript+module') {
+                shouldRemove = true;
+              } else if (!type || type === 'text/javascript' || type === 'application/javascript') {
+                var text = script.textContent || '';
+                if (text && (/ReactDOM\./.test(text) || /hydrate(Root)?\\s*\\(/i.test(text) || /createRoot\\s*\\(/i.test(text))) {
+                  shouldRemove = true;
+                }
+              }
+              if (shouldRemove) {
                 script.parentNode.removeChild(script);
               }
             }
