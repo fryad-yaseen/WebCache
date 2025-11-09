@@ -1,9 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Pressable, StyleSheet, TextInput } from 'react-native';
+import { Pressable, ScrollView, StyleSheet, TextInput } from 'react-native';
 import { router } from 'expo-router';
 import { useFocusEffect } from '@react-navigation/native';
+import { useTheme } from '@shopify/restyle';
+import * as Haptics from 'expo-haptics';
 
-import { Box, Text } from '@/theme/restyle';
+import { Box, Text, type Theme } from '@/theme/restyle';
 import { Colors } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import type { SavedPage } from '@/lib/cache';
@@ -13,15 +15,21 @@ import { MAX_CACHE_ENTRIES, preloadPageHtml } from '@/lib/page-html-cache';
 export default function HomeScreen() {
   const colorScheme = useColorScheme();
   const theme = Colors[colorScheme ?? 'light'];
+  const palette = useTheme<Theme>().colors;
 
   const [input, setInput] = useState('');
   const [pages, setPages] = useState<SavedPage[]>([]);
   const [clearingRecents, setClearingRecents] = useState(false);
 
-  const bgInput = colorScheme === 'dark' ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)';
-  const borderInput = colorScheme === 'dark' ? 'rgba(255,255,255,0.15)' : 'rgba(0,0,0,0.15)';
-  const placeholder = colorScheme === 'dark' ? 'rgba(255,255,255,0.55)' : 'rgba(0,0,0,0.5)';
-  const accent = colorScheme === 'dark' ? '#3b82f6' : Colors.light.tint;
+  const bgInput = palette.subtleBg;
+  const placeholder = colorScheme === 'dark' ? 'rgba(248,250,252,0.6)' : 'rgba(15,23,42,0.45)';
+  const accent = palette.accent;
+  const accentContrast = palette.accentContrast ?? '#fff';
+  const muted = palette.muted;
+
+  const pulse = useCallback(() => {
+    Haptics.selectionAsync().catch(() => {});
+  }, []);
 
   async function refresh() {
     setPages(await listSavedPages());
@@ -40,6 +48,7 @@ export default function HomeScreen() {
   function openUrl() {
     const url = normalizeUrl(input);
     if (!url) return;
+    pulse();
     router.push({ pathname: '/browser', params: { url } });
   }
 
@@ -51,6 +60,7 @@ export default function HomeScreen() {
   }, [pages]);
 
   const openSavedPage = useCallback((page: SavedPage) => {
+    pulse();
     preloadPageHtml(page);
     const openedAt = Date.now();
     markPageOpened(page.id).catch(() => {});
@@ -61,7 +71,7 @@ export default function HomeScreen() {
     } catch {
       router.push({ pathname: '/browser', params: { id: page.id } });
     }
-  }, []);
+  }, [pulse]);
 
   const recentPages = useMemo(() => {
     return pages
@@ -75,90 +85,166 @@ export default function HomeScreen() {
     setClearingRecents(true);
     try {
       await clearRecentOpens();
+      pulse();
       setPages((prev) =>
         prev.map((p) => (typeof p.lastOpenedAt === 'number' && p.lastOpenedAt > 0 ? { ...p, lastOpenedAt: null } : p))
       );
     } finally {
       setClearingRecents(false);
     }
-  }, [clearingRecents, recentPages.length]);
+  }, [clearingRecents, recentPages.length, pulse]);
 
-  return (
-    <Box flex={1} padding={3}>
-      <Box flexDirection="row" alignItems="center" style={styles.controlsRow}>
-        <TextInput
-          value={input}
-          onChangeText={setInput}
-          placeholder="Enter URL to open"
-          placeholderTextColor={placeholder}
-          autoCapitalize="none"
-          autoCorrect={false}
-          returnKeyType="go"
-          onSubmitEditing={openUrl}
-          style={[styles.input, { color: theme.text, borderColor: borderInput, backgroundColor: bgInput }]}
-        />
-        <Pressable onPress={openUrl} style={({ pressed }) => [styles.button, { backgroundColor: accent, opacity: pressed ? 0.85 : 1 }]}>
-          <Text color="buttonText">Open</Text>
+  const savedCount = pages.length;
+
+  const SectionHeader = ({
+    title,
+    actionLabel,
+    onAction,
+    disabled,
+  }: {
+    title: string;
+    actionLabel?: string;
+    onAction?: () => void;
+    disabled?: boolean;
+  }) => (
+    <Box style={styles.sectionHeader}>
+      <Text variant="subtitle">{title}</Text>
+      {actionLabel && onAction && (
+        <Pressable
+          onPress={onAction}
+          disabled={disabled}
+          style={({ pressed }) => [
+            styles.textButton,
+            { opacity: disabled ? 0.45 : pressed ? 0.75 : 1, borderColor: accent, backgroundColor: `${accent}1a` },
+          ]}
+        >
+          <Text style={{ color: accent }}>{actionLabel}</Text>
         </Pressable>
-      </Box>
+      )}
+    </Box>
+  );
 
-      <Box flexDirection="row" alignItems="center" justifyContent="space-between" style={{ marginTop: 12, marginBottom: 4 }}>
-        <Text variant="subtitle">Recently Opened Pages</Text>
-        {recentPages.length > 0 && (
-          <Pressable onPress={clearRecents} disabled={clearingRecents} style={({ pressed }) => [
-            styles.clearRecentBtn,
-            { borderColor: accent, opacity: clearingRecents ? 0.5 : pressed ? 0.85 : 1 },
-          ]}>
-            <Text style={{ color: accent }}>Clear</Text>
+  const EmptyState = ({ message }: { message: string }) => (
+    <Box style={[styles.emptyState, { borderColor: palette.border, backgroundColor: palette.subtleBg }]}>
+      <Text variant="defaultSemiBold">{message}</Text>
+    </Box>
+  );
+
+  const renderPageCard = (page: SavedPage, context: 'recent' | 'saved') => {
+    const isOnline = page.mode === 'online';
+    const pill =
+      context === 'recent' ? { label: 'Recent', tone: palette.accent } : isOnline ? { label: 'Online', tone: palette.accentMuted } : { label: 'Offline', tone: palette.success };
+    const subtitle = context === 'recent' && page.lastOpenedAt ? `Opened ${formatRelativeTime(page.lastOpenedAt)}` : undefined;
+    const onDelete = async () => {
+      await removeSavedPage(page.id);
+      pulse();
+      refresh();
+    };
+
+    return (
+      <Pressable
+        key={`${context}-${page.id}`}
+        onPress={() => openSavedPage(page)}
+        style={({ pressed }) => [
+          styles.pageCard,
+          {
+            backgroundColor: palette.surface,
+            borderColor: palette.border,
+            shadowColor: palette.cardShadow,
+            opacity: pressed ? 0.92 : 1,
+          },
+        ]}
+      >
+        <Box style={styles.pageMeta}>
+          <Box style={[styles.pill, { backgroundColor: withAlpha(pill.tone, 0.15) }]}>
+            <Text variant="caption" style={{ color: pill.tone }}>
+              {pill.label}
+            </Text>
+          </Box>
+          <Text style={styles.pageTitle} numberOfLines={1}>
+            {page.title || page.url}
+          </Text>
+          <Text variant="caption" numberOfLines={1}>
+            {page.url}
+          </Text>
+          {subtitle ? (
+            <Text variant="caption" style={{ marginTop: 2 }}>
+              {subtitle}
+            </Text>
+          ) : null}
+        </Box>
+        {context === 'saved' && (
+          <Pressable
+            onPress={(event) => {
+              event.stopPropagation();
+              void onDelete();
+            }}
+            style={({ pressed }) => [
+              styles.iconButton,
+              {
+                borderColor: palette.border,
+                backgroundColor: pressed ? palette.subtleBg : palette.surface,
+              },
+            ]}
+          >
+            <Text style={{ color: palette.danger }}>Delete</Text>
           </Pressable>
         )}
-      </Box>
-      <Box>
-        {recentPages.length === 0 ? (
-          <Text color="muted">Open any saved page to see it here.</Text>
-        ) : (
-          recentPages.map((p) => (
-            <Box key={`recent-${p.id}`} flexDirection="row" alignItems="center" paddingVertical={2} borderBottomWidth={StyleSheet.hairlineWidth} borderBottomColor="border" style={{ gap: 8 }}>
-              <Box style={{ flex: 1 }}>
-                <Text numberOfLines={1} style={{ fontWeight: '600' }}>{p.title || p.url}</Text>
-                <Text numberOfLines={1} color="muted" style={{ fontSize: 12 }}>{p.url}</Text>
-                <Text numberOfLines={1} color="muted" style={{ fontSize: 11 }}>
-                  Last opened {new Date(p.lastOpenedAt).toLocaleString()}
-                </Text>
-              </Box>
-              <Pressable onPress={() => openSavedPage(p)} style={({ pressed }) => [styles.smallBtn, { backgroundColor: accent, opacity: pressed ? 0.85 : 1 }]}>
-                <Text color="buttonText">Open</Text>
-              </Pressable>
-            </Box>
-          ))
-        )}
-      </Box>
+      </Pressable>
+    );
+  };
 
-      <Text variant="subtitle" style={{ marginTop: 20, marginBottom: 4 }}>Saved Pages</Text>
-      <Box flex={1}>
-        {pages.length === 0 ? (
-          <Text color="muted">No saved pages yet.</Text>
-        ) : (
-          pages.map((p) => (
-            <Box key={p.id} flexDirection="row" alignItems="center" paddingVertical={2} borderBottomWidth={StyleSheet.hairlineWidth} borderBottomColor="border" style={{ gap: 8 }}>
-              <Box style={{ flex: 1 }}>
-                <Text numberOfLines={1} style={{ fontWeight: '600' }}>{p.title || p.url}</Text>
-                <Text numberOfLines={1} color="muted" style={{ fontSize: 12 }}>{p.url}</Text>
-                <Text numberOfLines={1} color="muted" style={{ fontSize: 11 }}>
-                  {p.mode === 'online' ? 'Online bookmark (scroll restore only)' : 'Offline snapshot'}
-                </Text>
-              </Box>
-              <Pressable onPress={() => openSavedPage(p)} style={({ pressed }) => [styles.smallBtn, { backgroundColor: accent, opacity: pressed ? 0.85 : 1 }]}>
-                <Text color="buttonText">Open</Text>
-              </Pressable>
-              <Pressable onPress={async () => { await removeSavedPage(p.id); refresh(); }} style={({ pressed }) => [styles.smallBtn, { backgroundColor: '#d33', opacity: pressed ? 0.85 : 1 }]}>
-                <Text color="buttonText">Delete</Text>
-              </Pressable>
+  return (
+    <Box flex={1} backgroundColor="background">
+      <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
+        <Box style={styles.screenPadding}>
+          <Box style={styles.headerRow}>
+            <Box style={styles.headerCopy}>
+              <Text variant="title">Library</Text>
+              <Text variant="caption" style={{ color: muted, marginTop: 4 }}>
+                Offline-first cache for the web you care about.
+              </Text>
             </Box>
-          ))
-        )}
-      </Box>
+            <Box style={[styles.statTile, { backgroundColor: palette.surface, borderColor: palette.border }]}>
+              <Text style={styles.statValue}>{savedCount}</Text>
+              <Text variant="caption" style={{ marginTop: 2 }}>
+                Saved
+              </Text>
+            </Box>
+          </Box>
 
+          <Box style={[styles.card, { backgroundColor: palette.surface, borderColor: palette.border }]}>
+            <Text variant="subtitle">Open URL</Text>
+            <Box style={[styles.inputShell, { backgroundColor: bgInput }]}>
+              <TextInput
+                value={input}
+                onChangeText={setInput}
+                placeholder="https://"
+                placeholderTextColor={placeholder}
+                autoCapitalize="none"
+                autoCorrect={false}
+                returnKeyType="go"
+                onSubmitEditing={openUrl}
+                style={[styles.input, { color: theme.text }]}
+              />
+            </Box>
+            <Pressable onPress={openUrl} style={({ pressed }) => [styles.primaryButton, { backgroundColor: accent, opacity: pressed ? 0.9 : 1 }]}>
+              <Text style={{ color: accentContrast, fontWeight: '600' }}>Go</Text>
+            </Pressable>
+          </Box>
+
+          <SectionHeader
+            title="Recently opened"
+            actionLabel={recentPages.length > 0 ? (clearingRecents ? 'Clearing…' : 'Clear history') : undefined}
+            onAction={recentPages.length > 0 ? clearRecents : undefined}
+            disabled={clearingRecents}
+          />
+          {recentPages.length === 0 ? <EmptyState message="Open any saved page to populate recents." /> : recentPages.map((p) => renderPageCard(p, 'recent'))}
+
+          <SectionHeader title="Library" />
+          {pages.length === 0 ? <EmptyState message="Nothing saved yet. Open a page above and save it in the browser." /> : pages.map((p) => renderPageCard(p, 'saved'))}
+        </Box>
+      </ScrollView>
     </Box>
   );
 }
@@ -175,51 +261,130 @@ function normalizeUrl(value: string): string {
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    padding: 12,
-    gap: 8,
+  scrollContent: {
+    paddingTop: 28,
+    paddingBottom: 36,
   },
-  controlsRow: {
+  screenPadding: {
+    paddingHorizontal: 20,
+  },
+  headerRow: {
     flexDirection: 'row',
-    gap: 8,
+    justifyContent: 'space-between',
+    gap: 16,
+    marginBottom: 24,
     alignItems: 'center',
+  },
+  headerCopy: {
+    flex: 1,
+  },
+  statTile: {
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderRadius: 18,
+    borderWidth: StyleSheet.hairlineWidth,
+    minWidth: 90,
+    alignItems: 'center',
+  },
+  statValue: {
+    fontSize: 24,
+    fontWeight: '700',
+  },
+  card: {
+    borderRadius: 18,
+    padding: 18,
+    marginBottom: 28,
+    borderWidth: StyleSheet.hairlineWidth,
+  },
+  inputShell: {
+    marginTop: 12,
+    borderRadius: 14,
+    paddingHorizontal: 16,
+    height: 52,
+    justifyContent: 'center',
   },
   input: {
     flex: 1,
-    height: 40,
-    borderWidth: 1,
-    borderRadius: 8,
-    paddingHorizontal: 12,
+    height: 52,
+    fontSize: 17,
   },
-  button: {
-    height: 40,
-    paddingHorizontal: 16,
-    borderRadius: 8,
-    justifyContent: 'center',
+  primaryButton: {
+    marginTop: 12,
+    borderRadius: 14,
+    height: 48,
     alignItems: 'center',
+    justifyContent: 'center',
   },
-  buttonText: { color: '#fff', fontWeight: '600' },
-  itemRow: {
+  sectionHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
-    paddingVertical: 8,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: 'rgba(0,0,0,0.15)',
+    justifyContent: 'space-between',
+    marginBottom: 16,
   },
-  smallBtn: {
-    height: 32,
-    paddingHorizontal: 12,
-    borderRadius: 8,
-    justifyContent: 'center',
+  textButton: {
+    paddingHorizontal: 14,
+    paddingVertical: 6,
+    borderRadius: 999,
+    borderWidth: StyleSheet.hairlineWidth,
+  },
+  emptyState: {
+    borderWidth: StyleSheet.hairlineWidth,
+    padding: 16,
+    borderRadius: 18,
+    marginBottom: 12,
+  },
+  pageCard: {
+    borderRadius: 18,
+    padding: 16,
+    marginBottom: 12,
+    borderWidth: StyleSheet.hairlineWidth,
+    flexDirection: 'row',
     alignItems: 'center',
+    gap: 12,
   },
-  smallBtnText: { color: '#fff' },
-  clearRecentBtn: {
+  pageMeta: {
+    flex: 1,
+    gap: 6,
+  },
+  pageTitle: {
+    fontWeight: '600',
+    fontSize: 17,
+  },
+  pill: {
+    alignSelf: 'flex-start',
     paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 6,
-    borderWidth: 1,
+    paddingVertical: 2,
+    borderRadius: 999,
+  },
+  iconButton: {
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: 14,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
   },
 });
+
+function formatRelativeTime(value: number) {
+  if (!value) return '';
+  const delta = Date.now() - value;
+  if (!Number.isFinite(delta) || delta < 0) {
+    return new Date(value).toLocaleString();
+  }
+  const seconds = Math.floor(delta / 1000);
+  if (seconds < 60) return 'just now';
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 7) return `${days}d ago`;
+  return new Date(value).toLocaleDateString();
+}
+
+function withAlpha(color: string, alpha: number) {
+  const hex = (color || '#000000').replace('#', '');
+  const r = parseInt(hex.slice(0, 2), 16) || 0;
+  const g = parseInt(hex.slice(2, 4), 16) || 0;
+  const b = parseInt(hex.slice(4, 6), 16) || 0;
+  return `rgba(${r},${g},${b},${alpha})`;
+}

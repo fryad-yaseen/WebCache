@@ -1,11 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Platform, Pressable, StyleSheet, TextInput, View } from 'react-native';
+import { Platform, Pressable, ScrollView, StyleSheet, TextInput } from 'react-native';
+import * as Haptics from 'expo-haptics';
 import { Paths } from 'expo-file-system';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import { runOnJS } from 'react-native-reanimated';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 
-import { Box, Text } from '@/theme/restyle';
+import { useTheme } from '@shopify/restyle';
+
+import { Box, Text, type Theme } from '@/theme/restyle';
 import { Colors } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import type { SavedPage } from '@/lib/cache';
@@ -33,6 +36,7 @@ type ResourceRequestPayload = {
 export default function BrowserScreen() {
   const colorScheme = useColorScheme();
   const theme = Colors[colorScheme ?? 'light'];
+  const palette = useTheme<Theme>().colors;
   const router = useRouter();
   const params = useLocalSearchParams<{ url?: string; id?: string; page?: string }>();
   const prefetchedPage = useMemo(() => parseSavedPageParam(params.page), [params.page]);
@@ -65,6 +69,27 @@ export default function BrowserScreen() {
   const [savedHtml, setSavedHtml] = useState<string | null>(initialSavedHtml);
   const [savedHtmlStatus, setSavedHtmlStatus] = useState<'idle' | 'loading' | 'error'>(initialSavedHtml ? 'idle' : 'idle');
   const lastMarkedPageId = useRef<string | null>(null);
+  const [controlsHintVisible, setControlsHintVisible] = useState(false);
+  const controlsHintTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const selection = useCallback(() => {
+    Haptics.selectionAsync().catch(() => {});
+  }, []);
+  const notifySuccess = useCallback(() => {
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+  }, []);
+  const notifyWarning = useCallback(() => {
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (controlsHintTimer.current) {
+        clearTimeout(controlsHintTimer.current);
+        controlsHintTimer.current = null;
+      }
+    };
+  }, []);
 
   // Load saved page by ID if provided
   useEffect(() => {
@@ -127,11 +152,15 @@ export default function BrowserScreen() {
 
   function onGo() {
     if (!normalized) return;
+    selection();
     setSource({ type: 'remote', url: normalized });
     setOverlayVisible(false);
   }
 
-  const toggleOverlay = useCallback(() => setOverlayVisible((v) => !v), []);
+  const toggleOverlay = useCallback(() => {
+    selection();
+    setOverlayVisible((v) => !v);
+  }, [selection]);
   const twoFingerTap = useMemo(() =>
     Gesture.Tap()
       .numberOfTaps(1)
@@ -145,36 +174,49 @@ export default function BrowserScreen() {
 
   const goWebBack = useCallback(() => {
     if (!webCanGoBack || !webRef.current) return;
+    selection();
     try {
       // @ts-ignore
       webRef.current.goBack();
     } catch {}
-  }, [webCanGoBack]);
+  }, [webCanGoBack, selection]);
 
   const goWebForward = useCallback(() => {
     if (!webCanGoForward || !webRef.current) return;
+    selection();
     try {
       // @ts-ignore
       webRef.current.goForward();
     } catch {}
-  }, [webCanGoForward]);
+  }, [webCanGoForward, selection]);
 
-  function SegmentedOption({ label, selected, onPress, accent, disabled = false }: { label: string; selected: boolean; onPress: () => void; accent: string; disabled?: boolean }) {
+  function SegmentedOption({
+    label,
+    selected,
+    onPress,
+    accent,
+    disabled = false,
+  }: {
+    label: string;
+    selected: boolean;
+    onPress: () => void;
+    accent: string;
+    disabled?: boolean;
+  }) {
     return (
-      <Pressable onPress={onPress} disabled={disabled} style={({ pressed }) => [
-        {
-          height: 32,
-          paddingHorizontal: 12,
-          borderRadius: 8,
-          alignItems: 'center',
-          justifyContent: 'center',
-          borderWidth: 1,
-          borderColor: selected ? accent : 'rgba(125,125,125,0.4)',
-          backgroundColor: selected ? accent : 'transparent',
-          opacity: disabled ? 0.45 : pressed ? 0.85 : 1,
-        },
-      ]}>
-        <Text style={selected ? { color: '#fff' } : undefined}>{label}</Text>
+      <Pressable
+        onPress={onPress}
+        disabled={disabled}
+        style={({ pressed }) => [
+          styles.segmentPill,
+          {
+            backgroundColor: selected ? accent : 'transparent',
+            borderColor: selected ? accent : borderColor,
+            opacity: disabled ? 0.35 : pressed ? 0.85 : 1,
+          },
+        ]}
+      >
+        <Text style={[styles.segmentLabel, { color: selected ? accentContrast : mutedColor }]}>{label}</Text>
       </Pressable>
     );
   }
@@ -353,6 +395,7 @@ export default function BrowserScreen() {
         if (!html || !url) return;
         const saved = await addSavedPage({ html, title: title || url, url, scrollY: Number(scrollY || 0), mode: 'offline' });
         cachePageHtml(saved.id, html);
+        notifySuccess();
         setSaving(false);
         setOverlayVisible(false);
       } else if (data?.type === 'ERROR') {
@@ -363,16 +406,17 @@ export default function BrowserScreen() {
     } catch {
       // ignore parse errors
     }
-  }, [source, handleResourceRequest]);
+  }, [source, handleResourceRequest, notifySuccess]);
 
   const requestOfflineSave = useCallback(() => {
     if (!WebViewImpl || !webRef.current) return;
+    selection();
     setSaving(true);
     const opts = JSON.stringify({ mode: saveMode, deviceDark: colorScheme === 'dark' });
     const cmd = `(() => { try { if (window.__rn_savePage) { window.__rn_savePage(${opts}); } } catch (e) {} })(); true;`;
     // @ts-ignore
     webRef.current.injectJavaScript(cmd);
-  }, [WebViewImpl, saveMode, colorScheme]);
+  }, [WebViewImpl, saveMode, colorScheme, selection]);
 
   const saveOnlineBookmark = useCallback(async () => {
     const fallbackUrl = source.type === 'remote' ? source.url : source.type === 'saved' ? source.page.url : initialUrl;
@@ -381,6 +425,7 @@ export default function BrowserScreen() {
       setWebBanner({ type: 'error', message: 'Unable to determine the current URL to save.' });
       return;
     }
+    selection();
     setSaving(true);
     try {
       await addSavedPage({
@@ -390,76 +435,95 @@ export default function BrowserScreen() {
         mode: 'online',
       });
       setOverlayVisible(false);
+      notifySuccess();
       setWebBanner({ type: 'info', message: 'Saved online bookmark. Scroll position will restore next time.' });
     } catch {
+      notifyWarning();
       setWebBanner({ type: 'error', message: 'Unable to save online bookmark.' });
     } finally {
       setSaving(false);
     }
-  }, [currentNavMeta, initialUrl, source]);
+  }, [currentNavMeta, initialUrl, source, selection, notifySuccess, notifyWarning]);
 
   const handleSavePress = useCallback(() => {
     if (saving) return;
+    selection();
     if (saveType === 'online') {
       saveOnlineBookmark();
     } else {
       requestOfflineSave();
     }
-  }, [saveType, saveOnlineBookmark, requestOfflineSave, saving]);
+  }, [saveType, saveOnlineBookmark, requestOfflineSave, saving, selection]);
 
-  const overlayDim = withAlpha(realColor(theme.text), colorScheme === 'dark' ? 0.5 : 0.35);
-  const accent = colorScheme === 'dark' ? '#3b82f6' : theme.tint;
-  const subtleBg = colorScheme === 'dark' ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)';
-  const borderColor = withAlpha(realColor(theme.text), 0.15);
+  const overlayDim = palette.overlayDim ?? withAlpha(realColor(theme.text), colorScheme === 'dark' ? 0.55 : 0.4);
+  const accent = palette.accent;
+  const accentContrast = palette.accentContrast ?? '#fff';
+  const subtleBg = palette.subtleBg;
+  const borderColor = palette.border;
+  const surface = palette.surface;
+  const elevated = palette.elevated ?? palette.surface;
+  const mutedColor = palette.muted;
   const saveButtonLabel = saving ? 'Saving…' : (saveType === 'online' ? 'Save Online' : 'Save Offline');
   const saveButtonDisabled = saving || (saveType === 'offline' && !WebViewImpl);
+  const showControlsHint = useCallback(() => {
+    if (controlsHintTimer.current) {
+      clearTimeout(controlsHintTimer.current);
+    }
+    setControlsHintVisible(true);
+    controlsHintTimer.current = setTimeout(() => {
+      setControlsHintVisible(false);
+      controlsHintTimer.current = null;
+    }, 3500);
+  }, []);
 
   return (
     <GestureDetector gesture={twoFingerTap}>
       <Box style={styles.container} backgroundColor="background">
-          {/* Offline / error banner for remote pages */}
-          {source.type === 'remote' && webBanner && (
-            <Box
-              position="absolute"
-              top={0}
-              left={0}
-              right={0}
-              padding={3}
+        {source.type === 'remote' && webBanner && (
+          <Box
+            style={[
+              styles.bannerCard,
+              {
+                backgroundColor:
+                  webBanner.type === 'error'
+                    ? withAlpha(palette.danger || '#ef4444', 0.15)
+                    : withAlpha(accent, 0.16),
+                borderColor: webBanner.type === 'error' ? palette.danger : withAlpha(accent, 0.4),
+                shadowColor: palette.cardShadow,
+              },
+            ]}
+          >
+            <Text
               style={[
-                styles.banner,
-                webBanner.type === 'error'
-                  ? {
-                      backgroundColor: colorScheme === 'dark' ? '#7f1d1d' : '#dc2626',
-                      borderColor: colorScheme === 'dark' ? '#ef4444' : '#b91c1c',
-                    }
-                  : {
-                      backgroundColor: colorScheme === 'dark' ? 'rgba(59,130,246,0.25)' : 'rgba(59,130,246,0.12)',
-                      borderColor: withAlpha(accent, 0.45),
-                    },
+                styles.bannerTitle,
+                { color: webBanner.type === 'error' ? palette.danger : accent },
               ]}
             >
-              <Text style={[styles.bannerText, webBanner.type === 'error' ? { color: '#fff' } : { color: colorScheme === 'dark' ? '#bfdbfe' : '#1e3a8a' }]}>
-                {webBanner.message}
+              {webBanner.message}
+            </Text>
+            <Pressable
+              onPress={() => {
+                try {
+                  // @ts-ignore
+                  webRef.current?.reload?.();
+                  setWebBanner(null);
+                } catch {}
+              }}
+              style={({ pressed }) => [
+                styles.bannerAction,
+                {
+                  backgroundColor: webBanner.type === 'error' ? palette.danger : accent,
+                  opacity: pressed ? 0.85 : 1,
+                },
+              ]}
+            >
+              <Text style={{ color: accentContrast, fontWeight: '600' }}>
+                {webBanner.type === 'error' ? 'Retry' : 'Try again'}
               </Text>
-              <View style={{ height: 8 }} />
-              <Pressable onPress={() => { try { // @ts-ignore
-                webRef.current?.reload?.(); setWebBanner(null); } catch {} }} style={({ pressed }) => [
-                  styles.button,
-                  {
-                    backgroundColor: webBanner.type === 'error' ? '#00000033' : withAlpha(accent, pressed ? 0.55 : 0.35),
-                    opacity: pressed ? 0.85 : 1,
-                  },
-                ]}>
-                <Text style={[styles.bannerButtonText, webBanner.type === 'error'
-                  ? { color: '#fff' }
-                  : { color: colorScheme === 'dark' ? '#dbeafe' : '#1e3a8a' }
-                ]}>
-                  {webBanner.type === 'error' ? 'Retry' : 'Try Again'}
-                </Text>
-              </Pressable>
-            </Box>
-          )}
-          {WebViewImpl && webviewSource ? (
+            </Pressable>
+          </Box>
+        )}
+        {WebViewImpl && webviewSource ? (
             <WebViewImpl
               ref={webRef}
               source={webviewSource}
@@ -475,7 +539,10 @@ export default function BrowserScreen() {
                 setWebBanner(null);
                 setWebLoading(true);
               }}
-              onLoadEnd={() => setWebLoading(false)}
+              onLoadEnd={() => {
+                setWebLoading(false);
+                showControlsHint();
+              }}
               onError={(syntheticEvent: any) => {
                 setWebLoading(false);
                 const nativeEvent = syntheticEvent?.nativeEvent;
@@ -533,85 +600,222 @@ export default function BrowserScreen() {
           )}
 
         {overlayVisible && (
-          <Box pointerEvents="box-none" style={[styles.overlay, { backgroundColor: overlayDim }]}> 
-            <Box style={[styles.panel]} backgroundColor="background">
-              <Text variant="subtitle">Controls</Text>
-              {source.type === 'remote' ? (
-                <>
-                  <Box flexDirection="row" alignItems="center" style={styles.controlsRow}>
-                    <TextInput
-                      value={input}
-                      onChangeText={setInput}
-                      placeholder="Enter URL (e.g. example.com)"
-                      placeholderTextColor={colorScheme==='dark' ? 'rgba(255,255,255,0.55)' : 'rgba(0,0,0,0.5)'}
-                      autoCapitalize="none"
-                      autoCorrect={false}
-                      keyboardType={Platform.select({ ios: 'url', android: 'url', default: 'default' })}
-                      returnKeyType="go"
-                      onSubmitEditing={onGo}
-                      style={[styles.input, { color: theme.text, borderColor, backgroundColor: subtleBg }]}
-                    />
-                    <Pressable onPress={onGo} style={({ pressed }) => [styles.button, { backgroundColor: accent, opacity: pressed ? 0.85 : 1 }]}>
-                      <Text color="buttonText">Go</Text>
-                    </Pressable>
-                  </Box>
-                  <Box flexDirection="row" alignItems="center" style={styles.controlsRow}>
-                    <SegmentedOption label="Offline" selected={saveType==='offline'} onPress={() => setSaveType('offline')} accent={accent} />
-                    <SegmentedOption label="Online" selected={saveType==='online'} onPress={() => setSaveType('online')} accent={accent} />
-                  </Box>
-                  <Text style={{ fontSize: 12, opacity: 0.8 }}>
-                    Offline saves cache the entire page for offline viewing. Online saves keep scroll position but require internet.
-                  </Text>
-                  <Box flexDirection="row" alignItems="center" style={styles.controlsRow}>
-                    <SegmentedOption label="Device" selected={saveMode==='device'} onPress={() => setSaveMode('device')} accent={accent} disabled={saveType==='online'} />
-                    <SegmentedOption label="Light" selected={saveMode==='light'} onPress={() => setSaveMode('light')} accent={accent} disabled={saveType==='online'} />
-                    <SegmentedOption label="Dark" selected={saveMode==='dark'} onPress={() => setSaveMode('dark')} accent={accent} disabled={saveType==='online'} />
-                  </Box>
-                  <Box flexDirection="row" alignItems="center" style={styles.controlsRow}>
-                    <Pressable
-                      onPress={goWebBack}
-                      disabled={!webCanGoBack}
-                      style={({ pressed }) => [
-                        styles.button,
-                        {
-                          backgroundColor: webCanGoBack ? accent : '#6b7280',
-                          opacity: pressed && webCanGoBack ? 0.85 : 1,
-                        },
-                      ]}
-                    >
-                      <Text color="buttonText">Back</Text>
-                    </Pressable>
-                    <Pressable
-                      onPress={goWebForward}
-                      disabled={!webCanGoForward}
-                      style={({ pressed }) => [
-                        styles.button,
-                        {
-                          backgroundColor: webCanGoForward ? accent : '#6b7280',
-                          opacity: pressed && webCanGoForward ? 0.85 : 1,
-                        },
-                      ]}
-                    >
-                      <Text color="buttonText">Forward</Text>
-                    </Pressable>
-                  </Box>
-                  <Box flexDirection="row" alignItems="center" style={styles.controlsRow}>
-                    <Pressable onPress={handleSavePress} disabled={saveButtonDisabled} style={({ pressed }) => [styles.button, { backgroundColor: saveButtonDisabled ? '#6b7280' : accent, opacity: pressed ? 0.85 : 1 }]}>
-                      <Text color="buttonText">{saveButtonLabel}</Text>
-                    </Pressable>
-                    <Pressable onPress={() => router.back()} style={({ pressed }) => [styles.button, { backgroundColor: colorScheme==='dark' ? '#2d2d2d' : '#444', opacity: pressed ? 0.85 : 1 }]}>
-                      <Text color="buttonText">Exit</Text>
-                    </Pressable>
-                  </Box>
-                </>
-              ) : (
-                <Box flexDirection="row" alignItems="center" style={styles.controlsRow}>
-                  <Pressable onPress={() => router.back()} style={({ pressed }) => [styles.button, { backgroundColor: colorScheme==='dark' ? '#2d2d2d' : '#444', opacity: pressed ? 0.85 : 1 }]}>
-                    <Text color="buttonText">Exit</Text>
+          <Box pointerEvents="box-none" style={[styles.overlay, { backgroundColor: overlayDim }]}>
+            <Box style={[styles.panelShell, { backgroundColor: elevated, borderColor }]}>
+              <ScrollView
+                style={styles.panelScroll}
+                contentContainerStyle={styles.panelContent}
+                showsVerticalScrollIndicator={false}
+                keyboardShouldPersistTaps="handled"
+              >
+                <Box style={styles.panelHeader}>
+                  <Text variant="subtitle">Quick controls</Text>
+                  <Pressable
+                    onPress={toggleOverlay}
+                    style={({ pressed }) => [
+                      styles.closeButton,
+                      { borderColor, opacity: pressed ? 0.7 : 1 },
+                    ]}
+                  >
+                    <Text style={{ color: mutedColor }}>Close</Text>
                   </Pressable>
                 </Box>
-              )}
+                <Text variant="caption" style={{ color: mutedColor }}>
+                  Two-finger tap anywhere to reopen this modal.
+                </Text>
+                <Box style={[styles.infoCard, { backgroundColor: subtleBg, borderColor }]}>
+                  <Text variant="defaultSemiBold" numberOfLines={1}>
+                    {currentNavMeta.title || 'Untitled page'}
+                  </Text>
+                  <Text variant="caption" numberOfLines={1} style={{ marginTop: 4 }}>
+                    {currentNavMeta.url || '—'}
+                  </Text>
+                </Box>
+                {source.type === 'remote' ? (
+                  <>
+                    <Text variant="label" style={styles.sectionLabel}>
+                      Address
+                    </Text>
+                    <Box style={[styles.inputRow, { borderColor, backgroundColor: surface }]}>
+                      <TextInput
+                        value={input}
+                        onChangeText={setInput}
+                        placeholder="Enter URL (e.g. example.com)"
+                        placeholderTextColor={colorScheme === 'dark' ? 'rgba(255,255,255,0.55)' : 'rgba(0,0,0,0.5)'}
+                        autoCapitalize="none"
+                        autoCorrect={false}
+                        keyboardType={Platform.select({ ios: 'url', android: 'url', default: 'default' })}
+                        returnKeyType="go"
+                        onSubmitEditing={onGo}
+                        style={[styles.panelInput, { color: theme.text }]}
+                      />
+                      <Pressable
+                        onPress={onGo}
+                        style={({ pressed }) => [
+                          styles.compactButton,
+                          { backgroundColor: accent, opacity: pressed ? 0.85 : 1 },
+                        ]}
+                      >
+                        <Text style={{ color: accentContrast, fontWeight: '600' }}>Go</Text>
+                      </Pressable>
+                    </Box>
+
+                    <Text variant="label" style={styles.sectionLabel}>
+                      Save type
+                    </Text>
+                    <Box style={styles.segmentedRow}>
+                      <SegmentedOption
+                        label="Offline"
+                        selected={saveType === 'offline'}
+                        onPress={() => {
+                          selection();
+                          setSaveType('offline');
+                        }}
+                        accent={accent}
+                      />
+                      <SegmentedOption
+                        label="Online"
+                        selected={saveType === 'online'}
+                        onPress={() => {
+                          selection();
+                          setSaveType('online');
+                        }}
+                        accent={accent}
+                      />
+                    </Box>
+                    <Text variant="caption" style={{ color: mutedColor, marginTop: 8 }}>
+                      Offline copies capture the full page for travel. Online saves keep things light but need a connection.
+                    </Text>
+
+                    <Text variant="label" style={styles.sectionLabel}>
+                      Appearance
+                    </Text>
+                    <Box style={styles.segmentedRow}>
+                      <SegmentedOption
+                        label="Device"
+                        selected={saveMode === 'device'}
+                        onPress={() => {
+                          selection();
+                          setSaveMode('device');
+                        }}
+                        accent={accent}
+                        disabled={saveType === 'online'}
+                      />
+                      <SegmentedOption
+                        label="Light"
+                        selected={saveMode === 'light'}
+                        onPress={() => {
+                          selection();
+                          setSaveMode('light');
+                        }}
+                        accent={accent}
+                        disabled={saveType === 'online'}
+                      />
+                      <SegmentedOption
+                        label="Dark"
+                        selected={saveMode === 'dark'}
+                        onPress={() => {
+                          selection();
+                          setSaveMode('dark');
+                        }}
+                        accent={accent}
+                        disabled={saveType === 'online'}
+                      />
+                    </Box>
+
+                    <Text variant="label" style={styles.sectionLabel}>
+                      Navigate
+                    </Text>
+                    <Box style={styles.inlineActions}>
+                      <Pressable
+                        onPress={goWebBack}
+                        disabled={!webCanGoBack}
+                        style={({ pressed }) => [
+                          styles.secondaryPill,
+                          {
+                            borderColor: webCanGoBack ? accent : borderColor,
+                            backgroundColor: webCanGoBack ? withAlpha(accent, 0.15) : 'transparent',
+                            opacity: webCanGoBack ? (pressed ? 0.85 : 1) : 0.4,
+                          },
+                        ]}
+                      >
+                        <Text style={{ color: webCanGoBack ? accent : mutedColor, fontWeight: '600' }}>Back</Text>
+                      </Pressable>
+                      <Pressable
+                        onPress={goWebForward}
+                        disabled={!webCanGoForward}
+                        style={({ pressed }) => [
+                          styles.secondaryPill,
+                          {
+                            borderColor: webCanGoForward ? accent : borderColor,
+                            backgroundColor: webCanGoForward ? withAlpha(accent, 0.15) : 'transparent',
+                            opacity: webCanGoForward ? (pressed ? 0.85 : 1) : 0.4,
+                          },
+                        ]}
+                      >
+                        <Text style={{ color: webCanGoForward ? accent : mutedColor, fontWeight: '600' }}>
+                          Forward
+                        </Text>
+                      </Pressable>
+                    </Box>
+
+                    <Pressable
+                      onPress={handleSavePress}
+                      disabled={saveButtonDisabled}
+                      style={({ pressed }) => [
+                        styles.primaryAction,
+                        {
+                          backgroundColor: saveButtonDisabled ? withAlpha(accent, 0.35) : accent,
+                          opacity: pressed ? 0.9 : 1,
+                        },
+                      ]}
+                    >
+                      <Text style={{ color: accentContrast, fontWeight: '700' }}>{saveButtonLabel}</Text>
+                    </Pressable>
+
+                    <Pressable
+                      onPress={() => router.back()}
+                      style={({ pressed }) => [
+                        styles.secondaryAction,
+                        { borderColor, opacity: pressed ? 0.85 : 1 },
+                      ]}
+                    >
+                      <Text style={{ color: theme.text, fontWeight: '600' }}>Exit to library</Text>
+                    </Pressable>
+                  </>
+                ) : (
+                  <>
+                    <Text variant="caption" style={{ color: mutedColor, marginTop: 16 }}>
+                      You are viewing an offline snapshot. Exit to pick another page.
+                    </Text>
+                    <Pressable
+                      onPress={() => router.back()}
+                      style={({ pressed }) => [
+                        styles.primaryAction,
+                        { backgroundColor: accent, opacity: pressed ? 0.9 : 1, marginTop: 24 },
+                      ]}
+                    >
+                      <Text style={{ color: accentContrast, fontWeight: '700' }}>Exit to library</Text>
+                    </Pressable>
+                  </>
+                )}
+              </ScrollView>
             </Box>
+          </Box>
+        )}
+        {controlsHintVisible && (
+          <Box
+            pointerEvents="none"
+            style={[
+              styles.toast,
+              {
+                backgroundColor: surface,
+                borderColor,
+                shadowColor: palette.cardShadow,
+              },
+            ]}
+          >
+            <Text style={{ color: theme.text, fontWeight: '600' }}>Two-finger tap for controls</Text>
           </Box>
         )}
         </Box>
@@ -1096,30 +1300,14 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
   },
-  input: {
-    flex: 1,
-    height: 40,
-    borderWidth: 1,
-    borderRadius: 8,
-    paddingHorizontal: 12,
-  },
-  button: {
-    height: 40,
-    paddingHorizontal: 16,
-    borderRadius: 8,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  buttonText: {
-    color: '#fff',
-    fontWeight: '600',
-  },
   webview: {
     flex: 1,
   },
   placeholder: {
     flex: 1,
-    padding: 12,
+    padding: 16,
+    justifyContent: 'center',
+    gap: 12,
   },
   overlay: {
     position: 'absolute',
@@ -1127,28 +1315,148 @@ const styles = StyleSheet.create({
     right: 0,
     bottom: 0,
     top: 0,
-    justifyContent: 'flex-end',
-  },
-  panel: {
-    padding: 12,
-    borderTopLeftRadius: 12,
-    borderTopRightRadius: 12,
-    gap: 8,
-  },
-  controlsRow: {
-    flexDirection: 'row',
-    gap: 8,
+    justifyContent: 'center',
     alignItems: 'center',
+    paddingVertical: 32,
+    paddingHorizontal: 20,
   },
-  banner: {
-    zIndex: 10,
+  panelShell: {
+    width: '100%',
+    maxWidth: 520,
+    borderRadius: 28,
     borderWidth: StyleSheet.hairlineWidth,
-    borderRadius: 8,
+    overflow: 'hidden',
   },
-  bannerText: {
+  panelScroll: {
+    maxHeight: '80%',
+    width: '100%',
+  },
+  panelContent: {
+    paddingHorizontal: 24,
+    paddingVertical: 24,
+    gap: 12,
+  },
+  panelHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 4,
+  },
+  closeButton: {
+    paddingHorizontal: 14,
+    paddingVertical: 6,
+    borderRadius: 999,
+    borderWidth: StyleSheet.hairlineWidth,
+  },
+  infoCard: {
+    borderRadius: 20,
+    padding: 16,
+    borderWidth: StyleSheet.hairlineWidth,
+    marginTop: 12,
+    gap: 4,
+  },
+  sectionLabel: {
+    marginTop: 24,
+    marginBottom: 10,
+  },
+  inputRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderRadius: 20,
+    borderWidth: StyleSheet.hairlineWidth,
+    paddingHorizontal: 16,
+    height: 56,
+  },
+  panelInput: {
+    flex: 1,
+    fontSize: 16,
+    marginRight: 12,
+  },
+  compactButton: {
+    height: 44,
+    paddingHorizontal: 18,
+    borderRadius: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  segmentedRow: {
+    flexDirection: 'row',
+    gap: 10,
+    flexWrap: 'wrap',
+  },
+  segmentPill: {
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderRadius: 999,
+    borderWidth: StyleSheet.hairlineWidth,
+  },
+  segmentLabel: {
     fontWeight: '600',
   },
-  bannerButtonText: {
-    fontWeight: '600',
+  inlineActions: {
+    flexDirection: 'row',
+    gap: 12,
+    marginTop: 12,
+  },
+  secondaryPill: {
+    flex: 1,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: 18,
+    paddingVertical: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  primaryAction: {
+    marginTop: 20,
+    borderRadius: 20,
+    height: 56,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  secondaryAction: {
+    marginTop: 12,
+    borderRadius: 18,
+    height: 54,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: StyleSheet.hairlineWidth,
+  },
+  bannerCard: {
+    position: 'absolute',
+    top: 88,
+    left: 20,
+    right: 20,
+    padding: 16,
+    borderRadius: 20,
+    borderWidth: StyleSheet.hairlineWidth,
+    zIndex: 15,
+    gap: 12,
+    shadowOpacity: 0.12,
+    shadowOffset: { width: 0, height: 10 },
+    shadowRadius: 20,
+    elevation: 6,
+  },
+  bannerTitle: {
+    fontWeight: '700',
+    fontSize: 16,
+  },
+  bannerAction: {
+    alignSelf: 'flex-start',
+    paddingHorizontal: 18,
+    paddingVertical: 10,
+    borderRadius: 999,
+  },
+  toast: {
+    position: 'absolute',
+    bottom: 28,
+    alignSelf: 'center',
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderRadius: 999,
+    borderWidth: StyleSheet.hairlineWidth,
+    shadowOpacity: 0.12,
+    shadowOffset: { width: 0, height: 6 },
+    shadowRadius: 12,
+    elevation: 4,
   },
 });
