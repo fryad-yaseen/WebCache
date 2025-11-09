@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Platform, Pressable, StyleSheet, TextInput, View } from 'react-native';
+import * as FileSystem from 'expo-file-system';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import { runOnJS } from 'react-native-reanimated';
 import { useLocalSearchParams, useRouter } from 'expo-router';
@@ -8,7 +9,8 @@ import { Box, Text } from '@/theme/restyle';
 import { Colors } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import type { SavedPage } from '@/lib/cache';
-import { addSavedPage, listSavedPages, readSavedHtml, updateScrollY } from '@/lib/cache';
+import { addSavedPage, getSavedPage, updateScrollY } from '@/lib/cache';
+import { cachePageHtml, getCachedPageHtml, preloadPageHtml } from '@/lib/page-html-cache';
 
 type WebViewType = any;
 
@@ -16,7 +18,9 @@ export default function BrowserScreen() {
   const colorScheme = useColorScheme();
   const theme = Colors[colorScheme ?? 'light'];
   const router = useRouter();
-  const params = useLocalSearchParams<{ url?: string; id?: string }>();
+  const params = useLocalSearchParams<{ url?: string; id?: string; page?: string }>();
+  const prefetchedPage = useMemo(() => parseSavedPageParam(params.page), [params.page]);
+  const initialUrl = typeof params.url === 'string' ? params.url : 'about:blank';
 
   const [input, setInput] = useState<string>(typeof params.url === 'string' ? params.url : '');
   const [overlayVisible, setOverlayVisible] = useState(false);
@@ -26,7 +30,12 @@ export default function BrowserScreen() {
   const [webCanGoForward, setWebCanGoForward] = useState(false);
 
   type Source = { type: 'remote'; url: string } | { type: 'saved'; page: SavedPage };
-  const [source, setSource] = useState<Source>(() => ({ type: 'remote', url: typeof params.url === 'string' ? params.url : 'about:blank' }));
+  const [source, setSource] = useState<Source>(() => {
+    if (prefetchedPage && typeof params.id === 'string' && prefetchedPage.id === params.id) {
+      return { type: 'saved', page: prefetchedPage };
+    }
+    return { type: 'remote', url: initialUrl };
+  });
   const webRef = useRef<WebViewType>(null);
   const [WebViewImpl, setWebViewImpl] = useState<WebViewType | null>(null);
   const [webviewError, setWebviewError] = useState<string | null>(null);
@@ -34,22 +43,41 @@ export default function BrowserScreen() {
   const [, setWebLoading] = useState<boolean>(false);
   const lastScrollRef = useRef(0);
   const scrollPersistTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [cachedHtml, setCachedHtml] = useState<string | null>(() => {
+    if (prefetchedPage) {
+      return getCachedPageHtml(prefetchedPage.id);
+    }
+    return null;
+  });
 
   // Load saved page by ID if provided
   useEffect(() => {
+    let cancelled = false;
+    const id = typeof params.id === 'string' ? params.id : null;
+    if (!id) return () => {};
+
+    if (prefetchedPage && prefetchedPage.id === id) {
+      setSource({ type: 'saved', page: prefetchedPage });
+      return () => {};
+    }
+
     (async () => {
-      if (typeof params.id === 'string' && params.id) {
-        const content = await readSavedHtml(params.id);
-        const pages = await listSavedPages();
-        const page = pages.find((p) => p.id === params.id);
-        if (content && page) {
-          (global as any).__RNWC_LAST_HTML = content.html;
-          (global as any).__RNWC_LAST_BASEURL = content.baseUrl || undefined;
-          setSource({ type: 'saved', page });
+      try {
+        const page = await getSavedPage(id);
+        if (!cancelled) {
+          if (page) {
+            setSource({ type: 'saved', page });
+          } else {
+            setWebBanner({ type: 'error', message: 'Saved page not found.' });
+          }
         }
-      }
+      } catch {}
     })();
-  }, [params.id]);
+
+    return () => {
+      cancelled = true;
+    };
+  }, [params.id, prefetchedPage]);
 
   useEffect(() => {
     try {
@@ -123,12 +151,41 @@ export default function BrowserScreen() {
     );
   }
 
-  const injectedBase = useMemo(() => getInjectedBaseScript(source.type === 'saved' ? source.page.scrollY : 0), [source]);
+  const savedScrollTarget = source.type === 'saved' ? source.page.scrollY : 0;
+  const savedBaseHref = source.type === 'saved' ? getBaseHref(source.page.url) : null;
+  const shouldUseFileUri = source.type === 'saved' && !cachedHtml;
+  const webviewSource = source.type === 'saved'
+    ? (cachedHtml
+        ? { html: cachedHtml, baseUrl: savedBaseHref ?? undefined }
+        : { uri: source.page.filePath })
+    : { uri: source.url };
+  const injectedBase = useMemo(() => getInjectedBaseScript(savedScrollTarget, savedBaseHref), [savedScrollTarget, savedBaseHref]);
 
   useEffect(() => {
     setWebCanGoBack(false);
     setWebCanGoForward(false);
     setWebBanner(null);
+  }, [source]);
+
+  useEffect(() => {
+    if (source.type !== 'saved') {
+      setCachedHtml(null);
+      return;
+    }
+    const existing = getCachedPageHtml(source.page.id);
+    if (existing) {
+      setCachedHtml(existing);
+      return;
+    }
+    let cancelled = false;
+    preloadPageHtml(source.page).then((html) => {
+      if (!cancelled) {
+        setCachedHtml(html);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
   }, [source]);
 
   // Live preview of theme choice before saving (remote pages only)
@@ -171,7 +228,8 @@ export default function BrowserScreen() {
       } else if (data?.type === 'PAGE_SNAPSHOT') {
         const { html, title, url, scrollY } = data.payload || {};
         if (!html || !url) return;
-        await addSavedPage({ html, title: title || url, url, scrollY: Number(scrollY || 0) });
+        const saved = await addSavedPage({ html, title: title || url, url, scrollY: Number(scrollY || 0) });
+        cachePageHtml(saved.id, html);
         setSaving(false);
       } else if (data?.type === 'ERROR') {
         setSaving(false);
@@ -243,13 +301,12 @@ export default function BrowserScreen() {
           {WebViewImpl ? (
             <WebViewImpl
               ref={webRef}
-              source={
-                source.type === 'remote'
-                  ? { uri: source.url }
-                  : { html: (global as any).__RNWC_LAST_HTML || '<html></html>', baseUrl: (global as any).__RNWC_LAST_BASEURL || undefined }
-              }
+              source={webviewSource}
               originWhitelist={["*"]}
               setSupportMultipleWindows={false}
+              allowingReadAccessToURL={shouldUseFileUri ? FileSystem.documentDirectory ?? undefined : undefined}
+              allowFileAccess={shouldUseFileUri}
+              allowFileAccessFromFileURLs={shouldUseFileUri}
               style={styles.webview}
               injectedJavaScriptBeforeContentLoaded={injectedBase}
               onMessage={handleMessage}
@@ -397,6 +454,48 @@ function normalizeUrl(value: string): string {
 }
 
 function realColor(color: string): string { return color || '#000000'; }
+function parseSavedPageParam(raw: unknown): SavedPage | null {
+  if (typeof raw !== 'string' || !raw) return null;
+  const attempts = [raw];
+  try {
+    attempts.push(decodeURIComponent(raw));
+  } catch {}
+  for (const candidate of attempts) {
+    try {
+      const parsed = JSON.parse(candidate);
+      const coerced = coerceSavedPage(parsed);
+      if (coerced) return coerced;
+    } catch {}
+  }
+  return null;
+}
+
+function coerceSavedPage(value: any): SavedPage | null {
+  if (!value || typeof value !== 'object') return null;
+  const { id, url, title, savedAt, scrollY, filePath } = value as Partial<SavedPage>;
+  if (typeof id !== 'string' || typeof url !== 'string' || typeof filePath !== 'string') {
+    return null;
+  }
+  return {
+    id,
+    url,
+    title: typeof title === 'string' ? title : url,
+    savedAt: typeof savedAt === 'number' && Number.isFinite(savedAt) ? savedAt : Date.now(),
+    scrollY: typeof scrollY === 'number' && Number.isFinite(scrollY) ? scrollY : Number(scrollY) || 0,
+    filePath,
+  };
+}
+
+function getBaseHref(value: string | undefined): string | null {
+  if (!value) return null;
+  try {
+    const u = new URL(value);
+    return `${u.protocol}//${u.host}/`;
+  } catch {
+    return null;
+  }
+}
+
 function withAlpha(color: string, alpha: number): string {
   const c = realColor(color).replace('#','');
   const r = parseInt(c.substring(0,2),16)||0;
@@ -405,7 +504,7 @@ function withAlpha(color: string, alpha: number): string {
   return `rgba(${r},${g},${b},${alpha})`;
 }
 
-function getInjectedBaseScript(initialScrollY: number) {
+function getInjectedBaseScript(initialScrollY: number, savedBaseHref: string | null) {
   const code = `
     (function(){
       try {
@@ -415,10 +514,46 @@ function getInjectedBaseScript(initialScrollY: number) {
         var throttle = function(fn, ms){ var t=0; return function(){ var now=Date.now(); if(now-t>ms){ t=now; try{ fn.apply(this, arguments);}catch(e){} } } };
         window.addEventListener('scroll', throttle(function(){ RNWV.send('SCROLL', { y: window.scrollY, x: window.scrollX, url: location.href }); }, 250), { passive: true });
 
-        if (${Number.isFinite(initialScrollY) ? initialScrollY : 0} > 0) {
-          var y = ${Math.floor(initialScrollY || 0)};
-          var scrollIt = function(){ try { window.scrollTo(0, y); } catch(e){} };
-          if (document.readyState === 'complete' || document.readyState === 'interactive') { setTimeout(scrollIt, 50); } else { document.addEventListener('DOMContentLoaded', function(){ setTimeout(scrollIt, 50); }); }
+        var baseHref = ${savedBaseHref ? JSON.stringify(savedBaseHref) : 'null'};
+        if (baseHref) {
+          var ensureBase = function(){
+            try {
+              var head = document.head || document.getElementsByTagName('head')[0] || document.documentElement;
+              if (!head) return;
+              var existing = head.querySelector('base[data-rnwc-base]');
+              if (!existing) {
+                existing = document.createElement('base');
+                existing.setAttribute('data-rnwc-base', '1');
+                if (head.firstChild) {
+                  head.insertBefore(existing, head.firstChild);
+                } else {
+                  head.appendChild(existing);
+                }
+              }
+              existing.setAttribute('href', baseHref);
+            } catch (e) {}
+          };
+          if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', ensureBase);
+          }
+          ensureBase();
+        }
+
+        var targetScroll = ${Number.isFinite(initialScrollY) ? Math.floor(initialScrollY) : 0};
+        if (targetScroll > 0) {
+          var applyScroll = function(attempts){
+            try { window.scrollTo(0, targetScroll); } catch(e) {}
+            var current = Math.abs(window.scrollY - targetScroll);
+            if (current > 1 && attempts < 16) {
+              requestAnimationFrame(function(){ applyScroll((attempts||0)+1); });
+            }
+          };
+          var kick = function(){ requestAnimationFrame(function(){ applyScroll(0); }); };
+          if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', kick, { once: true });
+          } else {
+            kick();
+          }
         }
 
         async function inlineImages(doc){

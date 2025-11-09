@@ -17,18 +17,27 @@ const ROOT_DIR = FileSystem.documentDirectory + 'webcache/';
 const PAGES_DIR = ROOT_DIR + 'pages/';
 const MANIFEST_PATH = ROOT_DIR + 'manifest.json';
 
+let ensuredDirsPromise: Promise<void> | null = null;
+let manifestCache: Manifest | null = null;
+let manifestPromise: Promise<Manifest> | null = null;
+
 async function ensureDirs() {
-  const rootInfo = await FileSystem.getInfoAsync(ROOT_DIR);
-  if (!rootInfo.exists) {
-    await FileSystem.makeDirectoryAsync(ROOT_DIR, { intermediates: true });
+  if (!ensuredDirsPromise) {
+    ensuredDirsPromise = (async () => {
+      const rootInfo = await FileSystem.getInfoAsync(ROOT_DIR);
+      if (!rootInfo.exists) {
+        await FileSystem.makeDirectoryAsync(ROOT_DIR, { intermediates: true });
+      }
+      const pagesInfo = await FileSystem.getInfoAsync(PAGES_DIR);
+      if (!pagesInfo.exists) {
+        await FileSystem.makeDirectoryAsync(PAGES_DIR, { intermediates: true });
+      }
+    })();
   }
-  const pagesInfo = await FileSystem.getInfoAsync(PAGES_DIR);
-  if (!pagesInfo.exists) {
-    await FileSystem.makeDirectoryAsync(PAGES_DIR, { intermediates: true });
-  }
+  return ensuredDirsPromise;
 }
 
-async function loadManifest(): Promise<Manifest> {
+async function readManifestFromDisk(): Promise<Manifest> {
   await ensureDirs();
   const info = await FileSystem.getInfoAsync(MANIFEST_PATH);
   if (!info.exists) {
@@ -38,15 +47,33 @@ async function loadManifest(): Promise<Manifest> {
     const content = await FileSystem.readAsStringAsync(MANIFEST_PATH);
     const parsed = JSON.parse(content) as Manifest;
     if (!parsed.pages) return { pages: [] };
-    return parsed;
+    return { pages: parsed.pages.map(clonePage) };
   } catch {
     return { pages: [] };
   }
 }
 
-async function saveManifest(manifest: Manifest) {
+async function loadManifest(): Promise<Manifest> {
+  if (manifestCache) return manifestCache;
+  if (!manifestPromise) {
+    manifestPromise = (async () => {
+      const manifest = await readManifestFromDisk();
+      manifestCache = manifest;
+      manifestPromise = null;
+      return manifest;
+    })();
+  }
+  return manifestPromise;
+}
+
+async function persistManifest(manifest: Manifest) {
+  manifestCache = manifest;
   await ensureDirs();
   await FileSystem.writeAsStringAsync(MANIFEST_PATH, JSON.stringify(manifest));
+}
+
+function clonePage(page: SavedPage): SavedPage {
+  return { ...page };
 }
 
 function makeId(): string {
@@ -55,9 +82,17 @@ function makeId(): string {
 }
 
 export async function listSavedPages(): Promise<SavedPage[]> {
-  const m = await loadManifest();
-  // Sort newest first
-  return m.pages.sort((a, b) => b.savedAt - a.savedAt);
+  const manifest = await loadManifest();
+  return manifest.pages
+    .map(clonePage)
+    .sort((a, b) => b.savedAt - a.savedAt);
+}
+
+export async function getSavedPage(id: string): Promise<SavedPage | null> {
+  if (!id) return null;
+  const manifest = await loadManifest();
+  const page = manifest.pages.find((p) => p.id === id);
+  return page ? clonePage(page) : null;
 }
 
 export async function addSavedPage(params: {
@@ -80,16 +115,16 @@ export async function addSavedPage(params: {
     filePath,
   };
   m.pages.push(page);
-  await saveManifest(m);
+  await persistManifest(m);
   return page;
 }
 
 export async function updateScrollY(id: string, scrollY: number): Promise<void> {
-  const m = await loadManifest();
-  const idx = m.pages.findIndex((p) => p.id === id);
+  const manifest = await loadManifest();
+  const idx = manifest.pages.findIndex((p) => p.id === id);
   if (idx === -1) return;
-  m.pages[idx].scrollY = scrollY;
-  await saveManifest(m);
+  manifest.pages[idx].scrollY = scrollY;
+  await persistManifest(manifest);
 }
 
 export async function readSavedHtml(id: string): Promise<{ html: string; baseUrl: string | null } | null> {
@@ -118,5 +153,9 @@ export async function removeSavedPage(id: string): Promise<void> {
     }
   } catch {}
   m.pages.splice(idx, 1);
-  await saveManifest(m);
+  await persistManifest(m);
+}
+
+export async function initializeCache(): Promise<void> {
+  await loadManifest();
 }

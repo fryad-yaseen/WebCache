@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { Pressable, StyleSheet, TextInput } from 'react-native';
 import { router } from 'expo-router';
 import { useFocusEffect } from '@react-navigation/native';
@@ -8,6 +8,7 @@ import { Colors } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import type { SavedPage } from '@/lib/cache';
 import { listSavedPages, removeSavedPage } from '@/lib/cache';
+import { preloadPageHtml } from '@/lib/page-html-cache';
 
 export default function HomeScreen() {
   const colorScheme = useColorScheme();
@@ -15,7 +16,6 @@ export default function HomeScreen() {
 
   const [input, setInput] = useState('');
   const [pages, setPages] = useState<SavedPage[]>([]);
-  const [refreshing, setRefreshing] = useState(false);
 
   const bgInput = colorScheme === 'dark' ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)';
   const borderInput = colorScheme === 'dark' ? 'rgba(255,255,255,0.15)' : 'rgba(0,0,0,0.15)';
@@ -23,9 +23,7 @@ export default function HomeScreen() {
   const accent = colorScheme === 'dark' ? '#3b82f6' : Colors.light.tint;
 
   async function refresh() {
-    setRefreshing(true);
     setPages(await listSavedPages());
-    setRefreshing(false);
   }
 
   useEffect(() => {
@@ -43,6 +41,22 @@ export default function HomeScreen() {
     if (!url) return;
     router.push({ pathname: '/browser', params: { url } });
   }
+
+  useEffect(() => {
+    pages.slice(0, 5).forEach((page) => {
+      preloadPageHtml(page);
+    });
+  }, [pages]);
+
+  const openSavedPage = useCallback((page: SavedPage) => {
+    preloadPageHtml(page);
+    try {
+      const payload = encodeURIComponent(JSON.stringify(page));
+      router.push({ pathname: '/browser', params: { id: page.id, page: payload } });
+    } catch {
+      router.push({ pathname: '/browser', params: { id: page.id } });
+    }
+  }, []);
 
   return (
     <Box flex={1} padding={3}>
@@ -74,7 +88,7 @@ export default function HomeScreen() {
                 <Text numberOfLines={1} style={{ fontWeight: '600' }}>{p.title || p.url}</Text>
                 <Text numberOfLines={1} color="muted" style={{ fontSize: 12 }}>{p.url}</Text>
               </Box>
-              <Pressable onPress={() => router.push({ pathname: '/browser', params: { id: p.id } })} style={({ pressed }) => [styles.smallBtn, { backgroundColor: accent, opacity: pressed ? 0.85 : 1 }]}>
+              <Pressable onPress={() => openSavedPage(p)} style={({ pressed }) => [styles.smallBtn, { backgroundColor: accent, opacity: pressed ? 0.85 : 1 }]}>
                 <Text color="buttonText">Open</Text>
               </Pressable>
               <Pressable onPress={async () => { await removeSavedPage(p.id); refresh(); }} style={({ pressed }) => [styles.smallBtn, { backgroundColor: '#d33', opacity: pressed ? 0.85 : 1 }]}>

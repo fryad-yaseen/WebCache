@@ -1,3 +1,4 @@
+import { useEffect } from 'react';
 import { DarkTheme, DefaultTheme, ThemeProvider } from '@react-navigation/native';
 import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
@@ -7,9 +8,13 @@ import { ThemeProvider as RestyleProvider } from '@shopify/restyle';
 import { darkTheme, lightTheme } from '@/theme/restyle';
 
 import { useColorScheme } from '@/hooks/use-color-scheme';
+import { warmSavedPages } from '@/lib/cache-warmup';
 
 export default function RootLayout() {
   const colorScheme = useColorScheme();
+  useEffect(() => {
+    warmSavedPages().catch(() => {});
+  }, []);
 
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
