@@ -43,12 +43,9 @@ export default function BrowserScreen() {
   const [, setWebLoading] = useState<boolean>(false);
   const lastScrollRef = useRef(0);
   const scrollPersistTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const [cachedHtml, setCachedHtml] = useState<string | null>(() => {
-    if (prefetchedPage) {
-      return getCachedPageHtml(prefetchedPage.id);
-    }
-    return null;
-  });
+  const initialSavedHtml = prefetchedPage ? getCachedPageHtml(prefetchedPage.id) : null;
+  const [savedHtml, setSavedHtml] = useState<string | null>(initialSavedHtml);
+  const [savedHtmlStatus, setSavedHtmlStatus] = useState<'idle' | 'loading' | 'error'>(initialSavedHtml ? 'idle' : 'idle');
 
   // Load saved page by ID if provided
   useEffect(() => {
@@ -152,17 +149,44 @@ export default function BrowserScreen() {
   }
 
   const savedScrollTarget = source.type === 'saved' ? source.page.scrollY : 0;
+  const savedPageUrl = source.type === 'saved' ? source.page.url : null;
   const savedBaseHref = source.type === 'saved' ? getBaseHref(source.page.url) : null;
-  const shouldUseFileUri = source.type === 'saved' && !cachedHtml;
+  const shouldUseFileUri = source.type === 'saved' && !savedHtml && savedHtmlStatus === 'error';
   const webviewSource = source.type === 'saved'
-    ? (cachedHtml
-        ? { html: cachedHtml, baseUrl: savedBaseHref ?? undefined }
-        : { uri: source.page.filePath })
+    ? (savedHtml
+        ? { html: savedHtml, baseUrl: savedPageUrl ?? savedBaseHref ?? undefined }
+        : (savedHtmlStatus === 'error' ? { uri: source.page.filePath } : null))
     : { uri: source.url };
   const injectedBase = useMemo(() => getInjectedBaseScript(savedScrollTarget, savedBaseHref), [savedScrollTarget, savedBaseHref]);
   const documentDirectoryUri = Platform.OS === 'web' ? undefined : Paths.document.uri;
+  const handleShouldStartLoadWithRequest = useCallback((request: any) => {
+    if (source.type !== 'saved') {
+      debugLog('Allowing remote navigation', request?.url);
+      return true;
+    }
+    const url: string = typeof request?.url === 'string' ? request.url : '';
+    if (!url) {
+      debugLog('Blocked navigation: missing URL in request while viewing snapshot');
+      return false;
+    }
+    const normalized = url.split('#')[0];
+    if (
+      normalized === 'about:blank' ||
+      normalized.startsWith('file://') ||
+      normalized.startsWith('data:')
+    ) {
+      debugLog('Allowing internal snapshot navigation', normalized);
+      return true;
+    }
+    debugLog('Blocked external navigation from snapshot', { url: normalized, savedHtmlStatus });
+    if (!webBanner || webBanner.type !== 'info') {
+      setWebBanner({ type: 'info', message: 'Viewing an offline snapshot. Use Go to browse live pages.' });
+    }
+    return false;
+  }, [source, webBanner, savedHtmlStatus]);
 
   useEffect(() => {
+    debugLog('Source changed', source.type === 'saved' ? { type: 'saved', id: source.page.id, url: source.page.url } : { type: 'remote', url: source.url });
     setWebCanGoBack(false);
     setWebCanGoForward(false);
     setWebBanner(null);
@@ -170,18 +194,31 @@ export default function BrowserScreen() {
 
   useEffect(() => {
     if (source.type !== 'saved') {
-      setCachedHtml(null);
+      debugLog('Exiting saved mode, clearing snapshot state');
+      setSavedHtml(null);
+      setSavedHtmlStatus('idle');
       return;
     }
     const existing = getCachedPageHtml(source.page.id);
     if (existing) {
-      setCachedHtml(existing);
+      debugLog('Using cached HTML for saved page', source.page.id);
+      setSavedHtml(existing);
+      setSavedHtmlStatus('idle');
       return;
     }
     let cancelled = false;
+    debugLog('Preloading saved HTML for', source.page.id);
+    setSavedHtml(null);
+    setSavedHtmlStatus('loading');
     preloadPageHtml(source.page).then((html) => {
-      if (!cancelled) {
-        setCachedHtml(html);
+      if (cancelled) return;
+      if (html) {
+        debugLog('Loaded saved HTML', { id: source.page.id, bytes: html.length });
+        setSavedHtml(html);
+        setSavedHtmlStatus('idle');
+      } else {
+        debugLog('Failed to load saved HTML', source.page.id);
+        setSavedHtmlStatus('error');
       }
     });
     return () => {
@@ -213,6 +250,9 @@ export default function BrowserScreen() {
   const handleMessage = useCallback(async (event: any) => {
     try {
       const data = JSON.parse(event?.nativeEvent?.data ?? '{}');
+      if (data?.type && data.type !== 'SCROLL') {
+        debugLog('WebView message', data.type, data.payload ? Object.keys(data.payload) : 'no payload');
+      }
       if (data?.type === 'SCROLL') {
         const y = Number(data?.payload?.y || 0);
         lastScrollRef.current = y;
@@ -229,10 +269,12 @@ export default function BrowserScreen() {
       } else if (data?.type === 'PAGE_SNAPSHOT') {
         const { html, title, url, scrollY } = data.payload || {};
         if (!html || !url) return;
+        debugLog('Saving snapshot', url, 'size', html.length);
         const saved = await addSavedPage({ html, title: title || url, url, scrollY: Number(scrollY || 0) });
         cachePageHtml(saved.id, html);
         setSaving(false);
       } else if (data?.type === 'ERROR') {
+        debugLog('Snapshot error payload', data?.payload);
         setSaving(false);
       }
     } catch {
@@ -243,6 +285,7 @@ export default function BrowserScreen() {
   const requestSave = useCallback(() => {
     if (!WebViewImpl || !webRef.current) return;
     setSaving(true);
+    debugLog('Requesting snapshot capture', { mode: saveMode, colorScheme });
     const opts = JSON.stringify({ mode: saveMode, deviceDark: colorScheme === 'dark' });
     const cmd = `(() => { try { if (window.__rn_savePage) { window.__rn_savePage(${opts}); } } catch (e) {} })(); true;`;
     // @ts-ignore
@@ -299,7 +342,7 @@ export default function BrowserScreen() {
               </Pressable>
             </Box>
           )}
-          {WebViewImpl ? (
+          {WebViewImpl && webviewSource ? (
             <WebViewImpl
               ref={webRef}
               source={webviewSource}
@@ -337,22 +380,34 @@ export default function BrowserScreen() {
                 setWebCanGoBack(!!navState?.canGoBack);
                 setWebCanGoForward(!!navState?.canGoForward);
               }}
+              onShouldStartLoadWithRequest={handleShouldStartLoadWithRequest}
             />
           ) : (
             <Box style={styles.placeholder}>
-              <Text variant="subtitle" style={{ textAlign: 'center' }}>
-                WebView not available yet.
-              </Text>
-              <Text style={{ textAlign: 'center', marginTop: 8 }}>
-                If you’re using Expo Go, build a Dev Client or rebuild after installing react-native-webview.
-              </Text>
-              {webviewError ? (
-                <Text style={{ marginTop: 8, opacity: 0.6 }}>Error: {webviewError}</Text>
-              ) : null}
-              {Platform.OS === 'web' ? (
-                // @ts-ignore
-                <iframe src={source.type === 'remote' ? source.url : ''} style={{ border: 0, width: '100%', height: '100%', marginTop: 12 }} />
-              ) : null}
+              {!WebViewImpl ? (
+                <>
+                  <Text variant="subtitle" style={{ textAlign: 'center' }}>
+                    WebView not available yet.
+                  </Text>
+                  <Text style={{ textAlign: 'center', marginTop: 8 }}>
+                    If you’re using Expo Go, build a Dev Client or rebuild after installing react-native-webview.
+                  </Text>
+                  {webviewError ? (
+                    <Text style={{ marginTop: 8, opacity: 0.6 }}>Error: {webviewError}</Text>
+                  ) : null}
+                  {Platform.OS === 'web' ? (
+                    // @ts-ignore
+                    <iframe src={source.type === 'remote' ? source.url : ''} style={{ border: 0, width: '100%', height: '100%', marginTop: 12 }} />
+                  ) : null}
+                </>
+              ) : (
+                <>
+                  <Text variant="subtitle" style={{ textAlign: 'center' }}>Loading saved page…</Text>
+                  <Text style={{ textAlign: 'center', marginTop: 8 }}>
+                    Please wait while we prepare the offline copy.
+                  </Text>
+                </>
+              )}
             </Box>
           )}
 
@@ -454,6 +509,16 @@ function normalizeUrl(value: string): string {
   }
 }
 
+function debugLog(...args: any[]): void {
+  if (typeof __DEV__ !== 'undefined' && !__DEV__) {
+    return;
+  }
+  try {
+    // eslint-disable-next-line no-console
+    console.log('[Browser]', ...args);
+  } catch {}
+}
+
 function realColor(color: string): string { return color || '#000000'; }
 function parseSavedPageParam(raw: unknown): SavedPage | null {
   if (typeof raw !== 'string' || !raw) return null;
@@ -491,7 +556,21 @@ function getBaseHref(value: string | undefined): string | null {
   if (!value) return null;
   try {
     const u = new URL(value);
-    return `${u.protocol}//${u.host}/`;
+    let path = u.pathname || '/';
+    if (!path.endsWith('/')) {
+      const lastSlash = path.lastIndexOf('/');
+      const lastSegment = lastSlash >= 0 ? path.slice(lastSlash + 1) : path;
+      const looksLikeFile = lastSegment.includes('.');
+      if (looksLikeFile) {
+        path = path.slice(0, lastSlash + 1);
+      } else {
+        path = `${path}/`;
+      }
+    }
+    if (!path.startsWith('/')) {
+      path = `/${path}`;
+    }
+    return `${u.protocol}//${u.host}${path || '/'}`;
   } catch {
     return null;
   }
@@ -588,6 +667,18 @@ function getInjectedBaseScript(initialScrollY: number, savedBaseHref: string | n
           }
         }
 
+        function stripScripts(root){
+          try {
+            var scripts = Array.prototype.slice.call(root.querySelectorAll('script'));
+            for (var i=0;i<scripts.length;i++){
+              var script = scripts[i];
+              if (script && script.parentNode) {
+                script.parentNode.removeChild(script);
+              }
+            }
+          } catch (e) {}
+        }
+
         window.__rn_savePage = async function(options){
           try {
             try {
@@ -605,7 +696,9 @@ function getInjectedBaseScript(initialScrollY: number, savedBaseHref: string | n
             }
             await inlineStylesheets(document);
             await inlineImages(document);
-            var html = '<!DOCTYPE html>'+document.documentElement.outerHTML;
+            var clone = document.documentElement.cloneNode(true);
+            stripScripts(clone);
+            var html = '<!DOCTYPE html>'+clone.outerHTML;
             RNWV.send('PAGE_SNAPSHOT', { html: html, title: document.title, url: location.href, scrollY: window.scrollY });
           } catch (e) {
             RNWV.send('ERROR', { message: (e && e.message) ? e.message : String(e) });
